@@ -2340,6 +2340,12 @@ async function main() {
     const vc = voiceCfg();
     if (!vc.enabled) throw new Error('语音功能已关闭（socialV2.voice.enabled=false）');
     const resolved = resolveVoicePathForV2(voiceRef);
+    // 语音 label 同样过出站守卫：它会以「我发了条语音」的形式进入会话记录与上下文。
+    if (label) {
+      const guardedLabel = guardOutboundV2(key, label);
+      if (!guardedLabel.ok) throw new Error(guardedLabel.reason);
+      label = guardedLabel.text;
+    }
     // 音量参数校验前置（AI 传错时给出可读错误，而不是让 ffmpeg 报奇怪的错）
     if (audio) resolveAudioProcessing({ volume: audio.volume ?? vc.defaultVolume, normalize: audio.normalize === true, loudness: audio.loudness ?? vc.loudness });
     voiceBudgetCheck(key, vc);
@@ -5729,18 +5735,23 @@ async function main() {
             sendJson({ ok: false, error: `最多发送 ${maxMsgs} 条` }, 400);
             return;
           }
-          for (const msg of messages) {
-            if (msg.length > maxChars) {
+          for (let i = 0; i < messages.length; i++) {
+            if (messages[i].length > maxChars) {
               sendJson({ ok: false, error: `单条消息不能超过 ${maxChars} 字` }, 400);
               return;
             }
-            if (SENSITIVE_RE.test(msg)) {
+            if (SENSITIVE_RE.test(messages[i])) {
               sendJson({ ok: false, error: '消息含敏感信息，已阻止发送' }, 403);
               return;
             }
+            const guarded = guardOutboundV2(key, messages[i]);
+            if (!guarded.ok) { sendJson({ ok: false, error: guarded.reason }, 403); return; }
+            messages[i] = guarded.text;
           }
           const st = getSocialV2State(key);
           const now = Date.now();
+          const nudge = guardLengthNudgeV2(key, st, messages);
+          if (!nudge.ok) { sendJson({ ok: false, error: nudge.reason }, 403); return; }
           try {
             const maxPerMinute = Number(sendCfg.maxSendPerMinute) || 0;
             const maxPerHour = Number(sendCfg.maxSendPerHour) || 0;
@@ -5860,20 +5871,25 @@ async function main() {
             sendJson({ ok: false, error: `最多发送 ${maxMsgs} 条` }, 400);
             return;
           }
-          for (const msg of messages) {
-            if (msg.length > maxChars) {
+          for (let i = 0; i < messages.length; i++) {
+            if (messages[i].length > maxChars) {
               sendJson({ ok: false, error: `单条消息不能超过 ${maxChars} 字` }, 400);
               return;
             }
-            if (SENSITIVE_RE.test(msg)) {
+            if (SENSITIVE_RE.test(messages[i])) {
               sendJson({ ok: false, error: '消息含敏感信息，已阻止发送' }, 403);
               return;
             }
+            const guarded = guardOutboundV2(key, messages[i]);
+            if (!guarded.ok) { sendJson({ ok: false, error: guarded.reason }, 403); return; }
+            messages[i] = guarded.text;
           }
           const delays = computeGapsV2(messages, gapMode, gapMs, gaps, sendCfg);
           // 先做发送频率检查并预占额度，再解析引用目标，避免未限流的引用查询打爆 OneBot。
           const st = getSocialV2State(key);
           const now = Date.now();
+          const nudge = guardLengthNudgeV2(key, st, messages);
+          if (!nudge.ok) { sendJson({ ok: false, error: nudge.reason }, 403); return; }
           const maxPerMinute = Number(sendCfg.maxSendPerMinute) || 0;
           const maxPerHour = Number(sendCfg.maxSendPerHour) || 0;
           const recentMinute = (st.sendTimes || []).filter((t) => now - t < 60000).length;
@@ -7904,6 +7920,10 @@ async function main() {
           if (!v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
           if (!v2ToolEnabled('sendImage')) { sendJson({ ok: false, error: '工具未启用：qq_send_image' }, 403); return; }
           if (shouldBlockSilentReply(key)) { sendJson({ ok: false, error: '静默模式已开启，当前不允许发送' }, 403); return; }
+          // caption 是模型自撰的出站文本，与普通消息一样要过出站守卫（称呼越界/元信息）。
+          const guardedCaption = guardOutboundV2(key, caption);
+          if (!guardedCaption.ok) { sendJson({ ok: false, error: guardedCaption.reason }, 403); return; }
+          const outboundCaption = guardedCaption.text;
           const settings = imageSettings();
           const resolvedFile = resolveImageFile({
             root: ROOT,
@@ -7916,7 +7936,7 @@ async function main() {
             return;
           }
           const abs = resolvedFile.abs;
-          if ([...KNOWN_AGENT_TOKENS].some((token) => token && (caption.includes(token) || abs.includes(token)))) {
+          if ([...KNOWN_AGENT_TOKENS].some((token) => token && (outboundCaption.includes(token) || abs.includes(token)))) {
             sendJson({ ok: false, error: '文件名/说明包含会话令牌，已阻止发送' }, 403);
             return;
           }
@@ -7939,7 +7959,7 @@ async function main() {
             return;
           }
           const segments = [];
-          if (caption) segments.push({ type: 'text', data: { text: escapeCqText(caption) } });
+          if (outboundCaption) segments.push({ type: 'text', data: { text: escapeCqText(outboundCaption) } });
           segments.push({ type: 'image', data: { file: resolvedFile.uri } });
           try {
             const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
@@ -8604,6 +8624,11 @@ async function main() {
           const maxChars = Math.max(1, Number(sendCfg.maxMessageChars) || 500);
           if (message.length > maxChars) { sendJson({ ok: false, error: `单条消息不能超过 ${maxChars} 字` }, 400); return; }
           if (SENSITIVE_RE.test(message)) { sendJson({ ok: false, error: '消息含敏感信息，已阻止发送' }, 403); return; }
+          const guardedSend = guardOutboundV2(key, message);
+          if (!guardedSend.ok) { sendJson({ ok: false, error: guardedSend.reason }, 403); return; }
+          const outboundText = guardedSend.text;
+          const nudgeSingle = guardLengthNudgeV2(key, null, [outboundText]);
+          if (!nudgeSingle.ok) { sendJson({ ok: false, error: nudgeSingle.reason }, 403); return; }
           // st/now 必须声明在 try **之外**：下面的 catch 要用它们回滚预占的发送额度。
           // 写在 try 里时 catch 拿到的是块作用域外的名字 ⇒ ReferenceError（send-burst
           // 曾整段踩过同型问题，见体检报告 #1 / R2）。后果不是"少一行日志"，而是
@@ -8622,14 +8647,14 @@ async function main() {
             }
             st.sendTimes.push(now);
             if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
-            const sentMessages = await sendMessagesV2(key, [message], [], actualReplyToMessageId, atUserId);
+            const sentMessages = await sendMessagesV2(key, [outboundText], [], actualReplyToMessageId, atUserId);
             recordSentMessagesV2(key, sentMessages);
             st.lastAiReplyAt = now;
             st.lastActionAt = now;
             st.wakeConfig.noActionCount = 0;
             saveSocialV2State();
             log(`[send] ${url.pathname} ${key}: 成功 ${sentMessages.length}/1 条`);
-            appendActivity(`${key} [send] 成功 ${sentMessages.length}/1 条：${message.slice(0, 80)}`);
+            appendActivity(`${key} [send] 成功 ${sentMessages.length}/1 条：${outboundText.slice(0, 80)}`);
             if (sentMessages.length > 0) scheduleReplyCheckV2(key);
             sendJson({ ok: true, key, sent: sentMessages.length, failed: sentMessages.length ? 0 : 1, quoted: quotedInfo });
           } catch (error) {
@@ -10038,8 +10063,101 @@ async function main() {
     return roleState.mode === 'silent' && key !== `private:${String(cfg.ownerQQ ?? '')}`;
   }
 
+  // ── 出站内容守卫（guardOutboundV2）：称呼越界 / 元信息泄漏 统一判定 ──────────
+  // 所有文本出站入口（send-message / send-burst / /api/send/* / 语音 label /
+  // auditAndSend 自动回复）都必须过这一个函数，不要在入口各自复制判定逻辑。
+  // socialV2.guard.<name> 支持两种写法：布尔（总开关）或对象（enabled + 参数）。
+  function guardSectionV2(name) {
+    const raw = cfg.socialV2?.guard?.[name];
+    return (raw && typeof raw === 'object') ? raw : {};
+  }
+  function guardSectionEnabledV2(name) {
+    const raw = cfg.socialV2?.guard?.[name];
+    if (raw && typeof raw === 'object') return raw.enabled !== false;
+    return raw !== false;
+  }
+  // 元信息拦词表：模型把内部状态/系统词汇泄漏到 QQ 时按子串拦截；可用 config 覆盖。
+  const DEFAULT_META_BLOCK_WORDS_V2 = ['⏳', '当前任务运行中', '新消息已排队', '我选择本次不发言', '不能为空', '沉默规则', '家规', '权限', '提示词', '系统提示', '已思考（用时'];
+  // 「老爹」出现在句首且紧跟标点/整句很短时，是在把对方叫成老爹（呼语），
+  // 替换成「你」语义明显不通，此时直接拦截让模型重写，而不是替换。
+  function looksLikeVocativeAddressV2(text) {
+    if (!text.startsWith('老爹')) return false;
+    const rest = text.slice(2);
+    if (!rest || rest.length <= 4) return true;
+    return /^[，,。！!？?~～\s]/.test(rest);
+  }
+  function guardOutboundV2(key, text) {
+    const raw = String(text ?? '');
+    // 元信息出站过滤：所有会话一律适用；drop + 403 让模型重写，不静默丢弃。
+    if (guardSectionEnabledV2('meta')) {
+      const section = guardSectionV2('meta');
+      const words = Array.isArray(section.words) && section.words.length ? section.words.map(String).filter(Boolean) : DEFAULT_META_BLOCK_WORDS_V2;
+      for (const w of words) {
+        if (w && raw.includes(w)) {
+          appendActivity(`[guard] meta-blocked (${key}): ${w}`);
+          return { ok: false, text: raw, reason: `outbound guard: 元信息泄漏（含「${w}」）——这是内部状态/系统词汇，不要发出去，请换成人话重写后再发` };
+        }
+      }
+    }
+    // 称呼越界：「饲养员」一律拦截；「老爹」只允许 owner 私聊与群聊（群友知道她有个爹）。
+    if (guardSectionEnabledV2('address') && raw) {
+      if (raw.includes('饲养员')) {
+        appendActivity(`[guard] 饲养员拦截 (${key})`);
+        return { ok: false, text: raw, reason: 'outbound guard: 称呼越界——「饲养员」是主会话的称呼，不该出现在 QQ 消息里，请重写' };
+      }
+      const ownerKey = `private:${String(cfg.ownerQQ ?? '')}`;
+      if (raw.includes('老爹') && key !== ownerKey && !key.startsWith('group:')) {
+        if (looksLikeVocativeAddressV2(raw)) {
+          appendActivity(`[guard] 老爹拦截·呼语 (${key})`);
+          return { ok: false, text: raw, reason: 'outbound guard: 称呼越界——这句里的「老爹」是在称呼对方，请改用对这位联系人的合适称呼后重发' };
+        }
+        appendActivity(`[guard] 老爹→你 (${key})`);
+        return { ok: true, text: raw.split('老爹').join('你'), reason: 'replaced' };
+      }
+    }
+    return { ok: true, text: raw, reason: '' };
+  }
+
+  // 长度软干预：只"拒绝 + 让模型重来"，不截断、不改写内容。
+  // 单条超长一律 403；多条且每条偏长 + 最近发过 → 每轮唤醒最多拒一次，仍超标则放行（防死锁）。
+  const lengthNudgeRetriesV2 = new Map(); // key -> 本轮唤醒内 multi 规则已拒绝次数
+  function guardLengthNudgeV2(key, st, messages) {
+    if (!guardSectionEnabledV2('lengthNudge')) return { ok: true, reason: '' };
+    const section = guardSectionV2('lengthNudge');
+    const maxSingle = Number(section.maxSingleChars) > 0 ? Number(section.maxSingleChars) : 40;
+    const threshold = Number(section.multiThreshold) > 0 ? Number(section.multiThreshold) : 12;
+    const windowMs = Number(section.recentWindowMs) > 0 ? Number(section.recentWindowMs) : 600000;
+    const list = (Array.isArray(messages) ? messages : [messages]).map((m) => String(m ?? ''));
+    for (const msg of list) {
+      if (msg.length > maxSingle) {
+        appendActivity(`[guard] length-nudge·单条超长 (${key}): ${msg.length} 字`);
+        return { ok: false, reason: `outbound guard: 这条 ${msg.length} 字太长了（上限 ${maxSingle} 字），请拆成几条自然的短句或精简后重发` };
+      }
+    }
+    if (list.length >= 2 && list.every((m) => m.length > threshold)) {
+      const sentRecently = (st?.sendTimes || []).some((t) => Date.now() - Number(t) < windowMs);
+      if (sentRecently) {
+        const used = lengthNudgeRetriesV2.get(key) || 0;
+        if (used < 1) {
+          lengthNudgeRetriesV2.set(key, used + 1);
+          appendActivity(`[guard] length-nudge (${key}): ${list.length} 条均超 ${threshold} 字`);
+          return { ok: false, reason: `outbound guard: 本轮建议只发一条短句——10 分钟内已发过且这次每条都超过 ${threshold} 字；请合并成一条短句再发（重试一次仍偏长会放行）` };
+        }
+      }
+    }
+    return { ok: true, reason: '' };
+  }
+
   // 统一出站消息：先完整文本审计，再发送。返回是否真的发出。
   async function auditAndSend(key, text) {
+    // 自动回复路径同样要过出站守卫（称呼越界/元信息泄漏）；这条路径没有 403 通道，只能整条拦下。
+    const guarded = guardOutboundV2(key, text);
+    if (!guarded.ok) {
+      log(`⚠️ 自动回复被出站守卫拦截 (${key})：${guarded.reason}`);
+      appendActivity(`${key} [guard] 自动回复被拦截（${guarded.reason.slice(0, 60)}）`);
+      return false;
+    }
+    text = guarded.text;
     const hasKnownToken = [...KNOWN_AGENT_TOKENS].some((t) => t && String(text ?? '').includes(t));
     if (shouldAuditKey(key) && (SENSITIVE_RE.test(text) || hasKnownToken)) {
       log(`⚠️ 回复被安全策略拦截 (${key})，疑似包含敏感信息${hasKnownToken ? '（含会话令牌）' : ''}`);
@@ -10416,6 +10534,7 @@ async function main() {
         bootstrapSent: false,
         wakeTimes: [],
         sendTimes: [],
+        proactiveWakeTimes: [],
         stickerCollectTimes: [],
         pendingWakeTimer: null,
         sleepTimer: null,
@@ -10485,6 +10604,7 @@ async function main() {
             bootstrapSent: !!val.bootstrapSent,
             wakeTimes: Array.isArray(val.wakeTimes) ? val.wakeTimes : [],
             sendTimes: Array.isArray(val.sendTimes) ? val.sendTimes : [],
+            proactiveWakeTimes: Array.isArray(val.proactiveWakeTimes) ? val.proactiveWakeTimes : [],
             stickerCollectTimes: Array.isArray(val.stickerCollectTimes) ? val.stickerCollectTimes : [],
             pendingWakeTimer: null,
             sleepTimer: null,
@@ -10578,6 +10698,7 @@ async function main() {
           bootstrapSent: st.bootstrapSent,
           wakeTimes: st.wakeTimes.slice(-200),
           sendTimes: st.sendTimes.slice(-500),
+          proactiveWakeTimes: Array.isArray(st.proactiveWakeTimes) ? st.proactiveWakeTimes.slice(-50) : [],
           stickerCollectTimes: Array.isArray(st.stickerCollectTimes) ? st.stickerCollectTimes.slice(-500) : [],
           lastIncomingAt: st.lastIncomingAt || 0,
           preSleepWaitSatisfiedAt: st.preSleepWaitSatisfiedAt || 0,
@@ -11497,6 +11618,8 @@ async function main() {
       } else {
         st.activeTopics.push({
           text: truncateText(text, 200),
+          // firstMentionAt 供【节奏事实】计算"同话题已持续多久"；老数据没有此字段时按无数据处理。
+          firstMentionAt: Date.now(),
           lastMentionAt: Date.now(),
           participants: Array.isArray(extra.participants) ? extra.participants.map((p) => redactKnownTokensOnly(String(p))).slice(0, 10) : [],
           pendingQuestion: redactKnownTokensOnly(String(extra.pendingQuestion || '')).slice(0, 200)
@@ -12849,6 +12972,38 @@ async function main() {
     return `【你的身份】你在 QQ 上的昵称是${label}${idText}。${callBits}；群名片可能与昵称不同，at/引用段里带${id ? ` ${id} ` : '你的 QQ 号'}就是在叫你。\n\n`;
   }
 
+  // 任务四：降频状态注入——把"你已经连发/对方久未回/话题拖太久"作为事实写进唤醒提示词。
+  // 只在触发阈值时返回内容（连续 ≥N 条 / 同话题 ≥N 小时 / 对方 ≥N 分钟没回），避免每轮都塞。
+  function paceFactsLineV2(st) {
+    if (!guardSectionEnabledV2('paceFacts')) return '';
+    const section = guardSectionV2('paceFacts');
+    const now = Date.now();
+    const facts = [];
+    const recent = Array.isArray(st.recentMessages) ? st.recentMessages : [];
+    let streak = 0;
+    for (let i = recent.length - 1; i >= 0; i--) {
+      if (recent[i] && recent[i].isSelf) streak += 1;
+      else break;
+    }
+    const consecTh = Number(section.consecutiveThreshold) > 0 ? Number(section.consecutiveThreshold) : 3;
+    if (streak >= consecTh) facts.push(`本会话你已连续 ${streak} 条`);
+    const noReplyMin = Number(section.noReplyMinutes) > 0 ? Number(section.noReplyMinutes) : 30;
+    if (st.lastIncomingAt && now - Number(st.lastIncomingAt) >= noReplyMin * 60000) {
+      facts.push(`对方上次回你距今 ${Math.round((now - Number(st.lastIncomingAt)) / 60000)} 分钟`);
+    }
+    const topicMs = (Number(section.topicHours) > 0 ? Number(section.topicHours) : 2) * 3600000;
+    const topics = (Array.isArray(st.activeTopics) ? st.activeTopics : [])
+      .filter((t) => t && t.firstMentionAt && now - Number(t.firstMentionAt) >= topicMs
+        && (!t.lastMentionAt || now - Number(t.lastMentionAt) < 6 * 3600000));
+    if (topics.length) {
+      const t = topics[topics.length - 1];
+      const dur = now - Number(t.firstMentionAt);
+      facts.push(`同一话题「${String(t.text || '').slice(0, 12)}」已持续 ${Math.floor(dur / 3600000)} 小时 ${Math.round((dur % 3600000) / 60000)} 分钟`);
+    }
+    if (!facts.length) return '';
+    return `【节奏事实】${facts.join('；')}。本条可以不回。`;
+  }
+
   function buildWakePromptV2(key, reason) {
     const roleState = readRoleState();
     const roleLine = roleState.role ? `【当前角色】${roleState.role}（完整角色卡请调用 qq_get_prompt 查看）\n\n` : '';
@@ -12887,6 +13042,9 @@ async function main() {
     const ownerDeviation = ownerDeviationLineV2(key);
     if (ownerDeviation) statusBits.push(ownerDeviation);
     const statusLine = `【此刻状态】${statusBits.join('；')}\n\n`;
+    // 【节奏事实】：只在连发/久未回/话题拖太久时注入一行事实（任务四）。
+    const paceFactsText = paceFactsLineV2(st);
+    const paceFactsLine = paceFactsText ? `${paceFactsText}\n\n` : '';
     // 【你和 TA 的关系线】：跨每日重置保留的长期关系记忆；只有 owner 私聊与群聊注入，
     // 其它私聊（例如群友）不注入，避免把饲养员的私事带过去。
     const relationText = relationBlockV2(key);
@@ -12942,6 +13100,7 @@ async function main() {
       { name: '梗库', text: memeLine, removable: true },
       { name: 'reply', text: replyLine, removable: false },
       { name: 'status', text: statusLine, removable: false },
+      { name: 'paceFacts', text: paceFactsLine, removable: false },
       { name: 'relation', text: relationLine, removable: false },
       { name: 'memo', text: memoLine, removable: false },
       { name: 'memoPending', text: memoPendingLine, removable: false },
@@ -13017,6 +13176,8 @@ async function main() {
       return;
     }
     const st = getSocialV2State(key);
+    // 新一轮唤醒：长度软干预的"本轮已拒一次"计数作废，重新计算（任务三）。
+    lengthNudgeRetriesV2.delete(key);
     // 防重入：如果该会话已经有一个 DSH turn 在进行中（AI 正在思考/调用工具），
     // 或已有排队/在途 prompt，则不再投递新的候选唤醒，避免“思维链进行中又塞入一个 question 唤醒”。
     if (isConversationBusyV2(key, st)) {
@@ -13360,6 +13521,20 @@ async function main() {
     st.proactiveTimer = null;
   }
 
+  // 任务五：proactiveWakeTimes 只记「主动唤醒真正触发」的时间戳，按本地日历日切分统计。
+  function countProactiveWakesTodayV2(st) {
+    const dayStart = new Date();
+    dayStart.setHours(0, 0, 0, 0);
+    const t0 = dayStart.getTime();
+    return (Array.isArray(st.proactiveWakeTimes) ? st.proactiveWakeTimes : []).filter((t) => Number(t) >= t0).length;
+  }
+  function markProactiveWakeV2(st) {
+    if (!Array.isArray(st.proactiveWakeTimes)) st.proactiveWakeTimes = [];
+    st.proactiveWakeTimes.push(Date.now());
+    if (st.proactiveWakeTimes.length > 50) st.proactiveWakeTimes = st.proactiveWakeTimes.slice(-50);
+    saveSocialV2State();
+  }
+
   function scheduleProactiveCheckV2(key) {
     if (cfg.socialV2?.proactive?.enabled === false) return;
     if (socialV2.paused || currentMode !== 'reserved2') return;
@@ -13375,6 +13550,25 @@ async function main() {
       ensureWakeableV2(st, { key });
       const idleThreshold = Number(p.idleThresholdMs) || 15 * 60 * 1000;
       const idle = Date.now() - (st.lastIncomingAt || 0);
+      // ── 任务五：主动消息配额/降频（socialV2.proactive.guardEnabled 可整体关闭）────
+      if (p.guardEnabled !== false) {
+        // ① 上次我方发言后对方零入站且间隔不足：跳过本轮，防止「未回追加」。
+        const skipMs = Number(p.unansweredSkipMs) >= 0 ? Number(p.unansweredSkipMs) : 30 * 60 * 1000;
+        if (st.lastAiReplyAt && Number(st.lastAiReplyAt) > Number(st.lastIncomingAt || 0) && Date.now() - Number(st.lastAiReplyAt) < skipMs) {
+          log(`[reserved2] 主动机会跳过 ${key}：上次发言后对方没回且未满 ${Math.round(skipMs / 60000)} 分钟`);
+          scheduleProactiveCheckV2(key);
+          return;
+        }
+        // ② 非 owner 私聊：每天主动唤醒 ≤ privateMaxPerDay 次（按 social-v2.json 统计）。
+        if (key.startsWith('private:') && key !== `private:${String(cfg.ownerQQ ?? '')}`) {
+          const privateMax = Number(p.privateMaxPerDay) >= 0 ? Number(p.privateMaxPerDay) : 2;
+          if (countProactiveWakesTodayV2(st) >= privateMax) {
+            log(`[reserved2] 主动机会跳过 ${key}：今日主动唤醒已达 ${privateMax} 次`);
+            scheduleProactiveCheckV2(key);
+            return;
+          }
+        }
+      }
       const probBase = Number(p.probability);
       let prob = Math.min(1, Math.max(0, Number.isFinite(probBase) ? probBase : 0.4));
       const pendingThoughts = Array.isArray(st.pendingThoughts) ? st.pendingThoughts.filter((t) => t && (!t.expiresAt || Date.now() < Number(t.expiresAt))).length : 0;
@@ -13385,7 +13579,18 @@ async function main() {
       const recent = Array.isArray(st.recentMessages) ? st.recentMessages : [];
       const aiCount = recent.filter((m) => m && m.isSelf && Date.now() - Number(m.time || 0) < 60 * 60 * 1000).length;
       if (aiCount >= 5) prob *= 0.3;
+      // ③ 群里 2 小时内没有任何真人消息（只剩自己/其他 bot 在说话）：主动概率 ×botOnlyFactor。
+      if (p.guardEnabled !== false && key.startsWith('group:')) {
+        const botIds = new Set((Array.isArray(p.botUserIds) ? p.botUserIds : []).map(String));
+        const hasHuman = recent.some((m) => m && !m.isSelf && !botIds.has(String(m.userId ?? '')) && Date.now() - Number(m.time || 0) < 2 * 60 * 60 * 1000);
+        if (!hasHuman) {
+          const factor = Number(p.botOnlyFactor) >= 0 ? Number(p.botOnlyFactor) : 0.5;
+          prob *= factor;
+          log(`[reserved2] 主动降频 ${key}：2 小时内无真人消息，概率 ×${factor}`);
+        }
+      }
       if (idle >= idleThreshold && Math.random() < prob && !isConversationBusyV2(key, st)) {
+        markProactiveWakeV2(st);
         void sendWakePromptV2(key, 'proactiveCheck').catch((error) => log(`[reserved2] proactive 唤醒异常 ${key}:`, error?.message ?? error));
       }
       scheduleProactiveCheckV2(key);
