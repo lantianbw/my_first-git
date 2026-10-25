@@ -70,7 +70,7 @@ test('pre-reply quiet checks, waiting for replies and pre-sleep observation have
 test('social autonomy and visual, forwarding, sticker and web capabilities remain described', () => {
   for (const text of [
     '【反 AI 味：拒绝有求必应】', '【保持主体性】', '【学习群友策略】',
-    '【不要当群管家/主持人】', '普通对话默认拆 2 条', '单条尽量短：群里大多数回复 ≤12 字', '不要用空格断句',
+    '【不要当群管家/主持人】', '普通对话默认拆 2 条', '单条 ≤20 字', '单条尽量短：群里大多数回复 1~15 字', '不要用空格断句',
     '不会自动发送到 QQ', 'qq_get_message_images', 'qq_get_forward_msg', 'nestedForwardIds',
     'qq_send_poke', 'qq_list_stickers', 'qq_get_sticker_image', 'qq_send_sticker',
     'qq_collect_sticker', 'qq_sticker_note', 'qq_get_self_image',
