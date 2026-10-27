@@ -83,6 +83,11 @@ import {
   pruneSampleFiles
 } from './samples.js';
 import { createDshPortScanner } from './dsh-port.js';
+import { createOnebotRetry } from './onebot-retry.js';
+import { decodeGifToSheet, isGifBuffer, gifHintOf, gifMediaPlan } from './gif-frames.js';
+import { createRelay } from './relay.js';
+import { loadAntiAiPatterns, checkAntiAi } from './anti-ai-patterns.js';
+import { evaluate as scoreText, formatVerdict } from './scorer.js';
 import {
   normalizeMediaConfig,
   imageCacheKey,
@@ -3681,6 +3686,31 @@ async function main() {
       const st = socialV2.conversations.get(canonical ?? key);
       return !!st && !!st.agentToken && tokenEq(token, st.agentToken);
     };
+    // 跨会话带话：双向但单向收口。状态（窗口计数、白名单）必须挂在服务生命周期上，
+    // 所以实例只建一次；校验顺序与方向规则在 src/relay.js 里（纯逻辑，可单测）。
+    const relay = createRelay({
+      cfg,
+      ownerQQ: cfg.ownerQQ,
+      hasSession: (key) => socialV2.conversations.has(canonicalV2Key(key) ?? key),
+      agentTokenOk,
+      maxChars: Number(cfg.socialV2?.send?.maxMessageChars) || 500,
+      isSensitive: (text) => SENSITIVE_RE.test(text),
+      guardLength: (to, text) => guardLengthNudgeV2(to, socialV2.conversations.get(to), [text]),
+      send: (to, text) => sendMessagesV2(to, [text], [], null).then((list) => list.length),
+      log: (message) => log(message),
+      appendActivity: (line) => appendActivity(line)
+    });
+    // A4 反 AI 味词库：启动时读一次（只读，不写 state）。换词库需重启桥才生效。
+    // 文件缺失/坏正则不阻断启动，只留一个 warning —— 词库属可选的风格增强。
+    const antiAiLibrary = loadAntiAiPatterns(path.join(STATE_DIR, 'anti-ai-patterns.json'));
+    if (antiAiLibrary.patterns.length) {
+      log(`[anti-ai] 词库已挂载 ${antiAiLibrary.patterns.length} 条（模式 ${String(cfg.socialV2?.antiAi?.mode ?? 'shadow')}）`);
+    } else if (antiAiLibrary.error !== 'missing') {
+      log(`⚠️ [anti-ai] 词库未挂载：${antiAiLibrary.error}`);
+    }
+    if (antiAiLibrary.skipped.length) {
+      log(`⚠️ [anti-ai] ${antiAiLibrary.skipped.length} 条正则不可用：${antiAiLibrary.skipped.join(' | ')}`);
+    }
     /**
      * 令牌是否匹配**任意**一个活跃二代会话。
      *
@@ -5794,6 +5824,19 @@ async function main() {
             saveSocialV2State();
             sendJson({ ok: false, error: error?.message ?? String(error) }, 500);
           }
+          return;
+        }
+        // 跨会话带话：开关、令牌、会话存在性、目标格式、方向规则、限频、文本、发送
+        // 全在 relay.handle 里按固定顺序做；这里只负责搬运与回包。
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/relay') {
+          const body = await readBody();
+          const result = await relay.handle({
+            key: body.key,
+            token: body.token ?? req.headers['x-agent-token'],
+            to: body.to,
+            text: body.text
+          });
+          sendJson(result.body, result.status);
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/socialV2/send-message') {
@@ -9295,6 +9338,26 @@ async function main() {
     pushUrl(media.url);
     for (const candidate of emojiCdnCandidates(emojiId)) pushUrl(candidate);
 
+    // 动图线索：网关常把 GIF 转码成 PNG 首帧，字节头就不再是 GIF89a。若消息段自己
+    // 有 .gif 文件名 / "动画"文案 / subType=1 / .gif URL，就先按 URL 抓原始字节 ——
+    // 拿到真 GIF 就原样返回（绝不转码），拼图逻辑才有机会生效。
+    const gifHint = gifHintOf(media);
+    let gifUrlFirst = '';
+    if (gifHint && urls.length) {
+      try {
+        const fetched = await safeFetchBuffer(urls[0], MAX_MEDIA_BYTES);
+        if (isGifBuffer(fetched.buffer)) {
+          log(`[media] gif-hint=${gifHint} url-first=ok bytes=image/gif`);
+          return { buffer: fetched.buffer, mimeType: 'image/gif' };
+        }
+        gifUrlFirst = 'fail';
+        log(`[media] gif-hint=${gifHint} url-first=fail bytes=${mimeFromBuffer(fetched.buffer) || 'unknown'}`);
+      } catch (error) {
+        gifUrlFirst = 'fail';
+        log(`[media] gif-hint=${gifHint} url-first=fail bytes=none（${error?.message ?? error}）`);
+      }
+    }
+
     const tryUrls = async () => {
       for (const url of urls) {
         try {
@@ -9352,7 +9415,13 @@ async function main() {
     const result = isSticker
       ? (await tryUrls()) ?? (await tryGetImage())
       : (await tryGetImage()) ?? (await tryUrls());
-    if (result) return result;
+    if (result) {
+      // 线索在、字节却不是 GIF：说明拿到的多半是网关转码后的首帧，属于降级，要留痕。
+      if (gifHint) {
+        log(`[media] gif-hint=${gifHint} url-first=${gifUrlFirst || 'skip'} bytes=${mimeFromBuffer(result.buffer) || result.mimeType || 'unknown'}`);
+      }
+      return result;
+    }
     if (failures.length) {
       log(`[media] ${label}获取失败（${failures.length} 次尝试）：${failures.slice(0, 3).join(' | ')}`);
     }
@@ -9415,13 +9484,40 @@ async function main() {
         const summary = sticker && media.summary ? `:${String(media.summary).slice(0, 20)}` : '';
         const label = sticker ? (summary ? `[表情${summary}]` : `[表情${index}]`) : `[图片${index}]`;
         if (img?.buffer) {
-          if (totalBytes + img.buffer.length > MAX_MEDIA_BYTES) {
+          // 模型对 GIF 只解第一帧，动图信息（挥手、点头、连续动作）会全丢：
+          // 抽几帧拼成一张分镜图顶上，并配一句阅读顺序说明。
+          let partBuffer = img.buffer;
+          let partMime = img.mimeType || 'image/jpeg';
+          let partName = `qq-${sticker ? 'sticker' : 'image'}-${index}.${partMime.split('/')[1]}`;
+          const extraParts = [];
+          // 真 GIF 才拼图；只是"线索显示是动图、字节却是首帧 PNG"时给模型一句说明，
+          // 免得它把动图当静态图读（动作、连续变化看不到）。
+          const gifHint = gifHintOf(media);
+          const gifPlan = gifMediaPlan(img.buffer, img.mimeType, gifHint);
+          if (gifPlan === 'sheet') {
+            const sheet = decodeGifToSheet(img.buffer);
+            if (sheet) {
+              log(`[media] gif → sheet frames=${sheet.frames} size=${sheet.width}x${sheet.height} bytes=${sheet.png.length}`);
+              extraParts.push({ type: 'text', text: `[动图，${sheet.frames} 帧拼图，按从左到右、从上到下依次]` });
+              partBuffer = sheet.png;
+              partMime = 'image/png';
+              partName = `qq-${sticker ? 'sticker' : 'image'}-${index}-sheet.png`;
+            } else {
+              extraParts.push({ type: 'text', text: '[动图，帧解析失败]' });
+            }
+          } else if (gifPlan === 'first-frame-only') {
+            log(`[media] gif-hint=${gifHint} sheet=skip bytes=${img.mimeType || 'unknown'}`);
+            extraParts.push({ type: 'text', text: '[动图，但只取到首帧]' });
+          }
+          // 预算按真正要发出去的那份算：拼图通常比原 GIF 小，按原图算会误判超限。
+          if (totalBytes + partBuffer.length > MAX_MEDIA_BYTES) {
             parts.push({ type: 'text', text: `${label}（图片总大小超限，已跳过）` });
             continue;
           }
-          totalBytes += img.buffer.length;
+          totalBytes += partBuffer.length;
           parts.push({ type: 'text', text: label });
-          parts.push({ type: 'image', mediaType: img.mimeType || 'image/jpeg', data: img.buffer.toString('base64'), name: `qq-${sticker ? 'sticker' : 'image'}-${index}.${(img.mimeType || 'image/jpeg').split('/')[1]}` });
+          for (const extra of extraParts) parts.push(extra);
+          parts.push({ type: 'image', mediaType: partMime, data: partBuffer.toString('base64'), name: partName });
         } else {
           parts.push({ type: 'text', text: `${label}（获取失败）` });
         }
@@ -9570,23 +9666,31 @@ async function main() {
     scheduleMediaCacheSave();
   }
 
-  /** 单张图片 OCR：8 秒超时；结果（含空结果）都进缓存，避免反复重试。 */
+  /** 单张图片 OCR：8 秒超时；失败退避重试 2 次（500ms / 1500ms）；结果（含空结果）都进缓存。 */
   async function ocrImageText(imageRef) {
     const ref = String(imageRef ?? '').trim();
     if (!ref) return { ok: false, text: '' };
     const cacheKey = imageCacheKey({ url: ref });
     const hit = readMediaCache(cacheKey);
     if (hit.hit) return { ok: hit.entry.ok, text: hit.entry.text };
-    try {
-      const data = await withTimeout(oneBotHttp('ocr_image', { image: ref }, 8000), 8000, 'ocr_image');
-      const text = extractTextPayload(data).replace(/\s+/g, ' ').trim();
-      writeMediaCache(cacheKey, { kind: 'image', ref, text, ok: !!text });
-      return { ok: !!text, text };
-    } catch (error) {
-      writeMediaCache(cacheKey, { kind: 'image', ref, text: '', ok: false });
-      log(`OCR 失败（${ref.slice(0, 80)}）：${error?.message ?? error}`);
-      return { ok: false, text: '' };
+    // QQ 侧 OCR 常回「服务忙,请稍后重试」这类瞬时失败，一次失败就放弃会让整条图片消息失去理解。
+    // 退避重试两次，仍失败才落缓存；失败只记一条日志（带尝试次数），避免每张图刷一行。
+    const retryDelays = [500, 1500];
+    let lastError = null;
+    for (let attempt = 1; attempt <= retryDelays.length + 1; attempt += 1) {
+      try {
+        const data = await withTimeout(oneBotHttp('ocr_image', { image: ref }, 8000), 8000, 'ocr_image');
+        const text = extractTextPayload(data).replace(/\s+/g, ' ').trim();
+        writeMediaCache(cacheKey, { kind: 'image', ref, text, ok: !!text });
+        return { ok: !!text, text };
+      } catch (error) {
+        lastError = error;
+        if (attempt <= retryDelays.length) await sleep(retryDelays[attempt - 1]);
+      }
     }
+    writeMediaCache(cacheKey, { kind: 'image', ref, text: '', ok: false });
+    log(`OCR 失败（尝试 ${retryDelays.length + 1} 次）：${lastError?.message ?? lastError}`);
+    return { ok: false, text: '' };
   }
 
   /** 语音转写：8 秒超时；失败缓存 ok:false，绝不编内容。 */
@@ -10088,6 +10192,42 @@ async function main() {
   }
   function guardOutboundV2(key, text) {
     const raw = String(text ?? '');
+    // A3 评分器：当前只接 shadow —— 给这条最终文本打分并落日志，不发也不拦。
+    // best-of-n（n=8 候选择优）要改生成调用链，尚未接线；这里只是旁路观测。
+    if (cfg.socialV2?.scorer?.enabled === true) {
+      try {
+        const verdict = scoreText(raw, {
+          isOwner: Number(cfg.ownerQQ) > 0 && key === `private:${Number(cfg.ownerQQ)}`,
+          // 出站这一刻拿不到「上一条问句 / 24h 梗用量 / bot 往返轮数」，按不适用处理（各维给 1）。
+          targetIsHuman: true
+        }, { threshold: Number(cfg.socialV2.scorer.threshold) || 0.6 });
+        log(`[scorer] shadow (${key}) ${formatVerdict(verdict)}`);
+        if (cfg.socialV2.scorer.log) {
+          fs.appendFileSync(path.resolve(ROOT, cfg.socialV2.scorer.log),
+            `${JSON.stringify({ t: Date.now(), key, mode: 'shadow', ...verdict })}\n`);
+        }
+      } catch (error) {
+        // 评分器只是旁路观测，坏了不能影响实际发送。
+        log(`⚠️ [scorer] shadow 打分失败：${error?.message ?? error}`);
+      }
+    }
+    // A4 反 AI 味词库：默认 shadow —— 只记命中，不拦不发。真正拦截需要
+    // socialV2.antiAi.mode = 'enforce'（block 级才拦），rewrite/hint 永远只是记录。
+    const antiAiMode = String(cfg.socialV2?.antiAi?.mode ?? 'shadow');
+    if (antiAiMode !== 'off' && antiAiLibrary.patterns.length) {
+      const hits = checkAntiAi(antiAiLibrary, raw);
+      if (hits.length) {
+        const summary = hits.map((h) => `${h.id}(${h.severity})`).join('、');
+        if (antiAiMode === 'enforce') {
+          const blocking = hits.filter((h) => h.severity === 'block');
+          if (blocking.length) {
+            appendActivity(`[anti-ai] blocked (${key}): ${blocking.map((h) => h.id).join('、')}`);
+            return { ok: false, text: raw, reason: `outbound guard: 触到硬拦句式 ${blocking[0].id}（${blocking[0].name}），请换个自然说法重写` };
+          }
+        }
+        log(`[anti-ai] ${antiAiMode} (${key}) ${summary}`);
+      }
+    }
     // 元信息出站过滤：所有会话一律适用；drop + 403 让模型重写，不静默丢弃。
     if (guardSectionEnabledV2('meta')) {
       const section = guardSectionV2('meta');
@@ -14768,6 +14908,8 @@ async function main() {
     // 用实际连接地址（自愈后可能与 config 里的初值不同，别打印过期的那个）
     const connectedUrl = bot.url ?? cfg.snowluma.wsUrl;
     snowlumaHealth.connected = true;
+    // 连上了：退避计数清零、退避回到 5s，并取消挂着的重试（重试状态机见下方 onebotRetry）。
+    onebotRetry.succeed();
     log(`SnowLuma 已连接：${connectedUrl}`);
     // 「已连接」只说明与 SnowLuma 的 WebSocket 通了，**不说明 QQ 侧收得到消息** ——
     // 这个区别见 startSnowlumaWatch 的说明。这里顺手把上游健康快照刷一次。
@@ -14865,20 +15007,50 @@ async function main() {
   }
 
   let tokenHealAt = 0;
+  /** 自愈一次 token：成功 true；失败/被 10s 节流 false。重试由下面的 onebotRetry 统一排。 */
   async function healTokenIfStale(reason) {
     const now = Date.now();
-    if (now - tokenHealAt < 10000) return;   // 节流：close 事件会连续触发
+    if (now - tokenHealAt < 10000) return false;   // 节流：close 事件会连续触发
     tokenHealAt = now;
     try {
       const r = await discoverSnowLumaConnection({ cfg, timeoutMs: 4000 });
       if (!r.ok) {
         log(`⚠️ token 自愈失败（${reason}）：${r.error}`);
-        return;
+        return false;
       }
       await applyHealedTokens(r);
       log(`   自愈完成：账号 ${r.self?.user_id ?? '?'}（${reason}）`);
+      return true;
     } catch (error) {
       log(`⚠️ token 自愈异常：${error?.message ?? error}`);
+      return false;
+    }
+  }
+
+  // OneBot 未就绪时的退避重试：5s → 15s → 60s → 300s，之后固定 300s，直到连上为止。
+  // 为什么必须自己排：实测整机重启后桥比 QQ 先起，3000/3001 端口还不存在，自愈只打一条
+  // 「token 自愈失败」就停手了；端口 5 分钟后恢复也没有人来叫醒它 —— 日志空白 6 小时 44 分，
+  // 桥「活着但完全不收发」。退避序列与计次逻辑在 src/onebot-retry.js（纯函数，可单测）。
+  const onebotRetry = createOnebotRetry({
+    log: (message) => log(message),   // `[bridge]` 前缀由 log() 统一加
+    run: retryOnebot
+  });
+
+  /** 一次「自愈 + 重连」尝试；没连上就排下一次（计次只在 onebotRetry 里推进）。 */
+  async function retryOnebot() {
+    // 到点的重试必须真跑一次：把 10 秒节流清零，否则「到点」会被节流吞掉。
+    tokenHealAt = 0;
+    try {
+      await healTokenIfStale('retry');
+    } catch (error) {
+      log(`⚠️ OneBot 重试异常：${error?.message ?? error}`);
+    }
+    if (snowlumaHealth.connected) return;   // 自愈时已经重连成功（open 会清零计数）
+    try {
+      await bot.connect();
+    } catch (error) {
+      log(`OneBot 重连失败：${error?.message ?? error}`);
+      onebotRetry.fail();
     }
   }
 
@@ -14888,7 +15060,9 @@ async function main() {
     // 连不上时最常见的原因就是换了 QQ 账号 → token 变了；顺手自愈。
     // 注意 1006 在**每次启动**都可能出现一次：HTTP token 与 WS token 是两个不同的值，
     // config.json 里存的是前者，WS 需要用自愈发现的那个（详见 bot.connect() 处的说明）。
-    void healTokenIfStale(`close code=${info?.code ?? '?'}`);
+    // 自愈完（无论成败）都要排进退避重试：端口整个不存在时自愈只会失败一次，
+    // 没有这一枪就再也没人叫醒它（2026-10-26 实测停摆 6h44m）。
+    void healTokenIfStale(`close code=${info?.code ?? '?'}`).then(() => onebotRetry.fail());
   });
   bot.on('error', (error) => {
     // SDK 在 WS 升级被拒（401 / 建连失败）时可能**只 emit error、不 emit close**，
@@ -14898,7 +15072,7 @@ async function main() {
       ? [error.code, error.message, error.reason, error.type].filter(Boolean).join(' | ') || JSON.stringify(error)
       : String(error ?? '');
     log(`SnowLuma 错误：${detail || '(无详情)'}`);
-    void healTokenIfStale(`error ${detail}`.trim().slice(0, 200));
+    void healTokenIfStale(`error ${detail}`.trim().slice(0, 200)).then(() => onebotRetry.fail());
   });
 
   // SnowLuma 尚未就绪时不阻塞桥接启动：SDK 自带后台重连，DSH 侧照常连接。
@@ -14911,6 +15085,8 @@ async function main() {
     // config/onebot_<QQ>.json，自愈就无从下手，这时才会一直连不上 —— 那种情况请查
     // 日志里的「token 自愈失败」与 config.json 的 snowluma.homeDir。
     log(`SnowLuma 首次连接未成功（将在后台自动重连并尝试自愈 WS token）: ${error?.message ?? error}`);
+    // 万一 SDK 连 close/error 都没发（issue #19），也要把退避重试排上，不能停手。
+    onebotRetry.fail();
   });
   log('桥接已启动。按 Ctrl+C 退出。');
   // 预热表情库：启动时同步一次 QQ 收藏表情，失败不阻塞（AI 首次调用工具时还会再试）。
