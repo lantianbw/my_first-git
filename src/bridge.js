@@ -114,6 +114,8 @@ import { shouldRotate } from './session/expiry.js';
 import { isDuplicate } from './outbound/dedupe.js';
 import { splitText } from './outbound/split.js';
 import { createRateLimiter } from './outbound/rate.js';
+import { isAllowed } from './auth/allow.js';
+import { judgeHealth } from './observability/health.js';
 import { judge as costJudge } from './cost/gate.js';
 import { evaluateLengthNudge } from './guards/length.js';
 import { evaluateContent } from './guards/outbound-content.js';
@@ -1645,10 +1647,40 @@ function allowed(kind, id, cfg) {
   // 配置字段兼容单数（group/private）与复数（groups/privates）两种写法。
   const s = String(id);
   const denyList = cfg.deny[kind] ?? cfg.deny[kind + 's'] ?? [];
-  if (denyList.map(String).includes(s)) return false;
   const allowList = cfg.allow[kind] ?? cfg.allow[kind + 's'] ?? [];
-  if (allowList.length > 0) return allowList.map(String).includes(s);
-  return cfg.allowAllWhenEmpty;
+  let result;
+  if (denyList.map(String).includes(s)) result = false;
+  else if (allowList.length > 0) result = allowList.map(String).includes(s);
+  else result = cfg.allowAllWhenEmpty;
+  allowShadowCompare(kind, s, cfg, allowList, result);
+  return result;
+}
+
+// auth/allow 的影子对比：把现有入参映射成模块入参，结论不同才记一条（10 分钟最多 5 条）。
+// 映射必然不完全等价（现实现没有 owner 概念），所以它只用于「发现两套标准的分歧」，
+// 不做任何拦截；开关 socialV2.allowShadow === false 可关掉。
+let allowShadowWindowStart = 0;
+let allowShadowCount = 0;
+function allowShadowCompare(kind, id, cfg, allowList, result) {
+  if (cfg.socialV2?.allowShadow === false) return;
+  try {
+    const shadow = isAllowed({
+      kind,
+      id,
+      ownerQQ: cfg.ownerQQ,
+      whitelist: { [kind]: allowList.map(String) },
+      mode: 'normal'
+    });
+    if (shadow.allowed === result) return;
+    const now = Date.now();
+    if (now - allowShadowWindowStart > 600000) {
+      allowShadowWindowStart = now;
+      allowShadowCount = 0;
+    }
+    if (allowShadowCount >= 5) return;
+    allowShadowCount += 1;
+    log(`[allow] 影子不一致：现实现=${result} 模块=${shadow.allowed}（${shadow.reason}） ${kind}:${id}`);
+  } catch {}
 }
 
 // 二代会话 key 规范化：只接受 group:正整数 / private:正整数，并去掉前导零，避免同一会话出现多个别名。
@@ -12184,6 +12216,24 @@ async function main() {
       reasons.push(`新输入token ${usage.newTokens}/${settings.dailyInputTokenLimit}`);
     }
     const status = reasons.length ? 'WARN' : 'OK';
+    // health 模块影子（粗对比）：现有按端口/在线判定，模块按事件陈旧/积压/成本判定，
+    // 两套标准本来不同，这里只记录分歧，不做任何拦截。unreadBacklog 暂不映射（两处统计口径未统一）。
+    try {
+      const shadowHealth = judgeHealth({
+        dshOk: Boolean(dshUp),
+        onebotOk: Boolean(online),
+        snowlumaOk: Boolean(snow3000 && snow3001 && snow5099),
+        lastEventAt: now.getTime(),
+        unreadBacklog: 0,
+        costToday: Number(tokenLedger.spentToday?.() ?? 0) || 0,
+        now: now.getTime()
+      });
+      if ((shadowHealth.level === 'healthy') !== (status === 'OK')) {
+        log(`[health] 影子不一致：现实现=${status} 模块=${shadowHealth.level}（${shadowHealth.reasons.join(',')}）`);
+      }
+    } catch (error) {
+      log(`⚠️ [health] 影子判定失败：${error?.message ?? error}`);
+    }
     const up = (value) => (value ? 'up' : 'down');
     const line = `${localStamp(now)} ${status}`
       + ` snowluma=3000:${up(snow3000)},3001:${up(snow3001)},5099:${up(snow5099)}`
