@@ -49,7 +49,7 @@ import { extractTextPayload } from './media-tools.js';
 import { normalizeFriendWhitelist, findFriendWhitelistEntry, persistAllowPrivate, buildFriendRequestNotice } from './friend-request.js';
 import { resolveImageFile } from './image-path.js';
 import { sanitizeSaveName, extFromMime, ensureImageExt } from './save-path.js';
-import { normalizeRelations, appendRelationEntry, formatRelationBlock } from './relations.js';
+import { normalizeRelations, appendRelationEntry } from './relations.js';
 import {
   normalizeAgenda,
   normalizeProfile,
@@ -108,6 +108,10 @@ import { evaluate as scoreText, formatVerdict } from './scorer.js';
 import { createChain } from './guards/chain.js';
 import { rank as rankMemories } from './content/memory-score.js';
 import { createModuleSwitch } from './tools/module-switch.js';
+import { createRelationStore } from './content/relation-store.js';
+import { nextInterval } from './scheduler/interval.js';
+import { shouldRotate } from './session/expiry.js';
+import { isDuplicate } from './outbound/dedupe.js';
 import { judge as costJudge } from './cost/gate.js';
 import { evaluateLengthNudge } from './guards/length.js';
 import { evaluateContent } from './guards/outbound-content.js';
@@ -10590,6 +10594,26 @@ async function main() {
         log(`[anti-ai] ${antiAiMode} (${key}) ${summary}`);
       }
     }
+    // 重复话术去重（socialV2.dedupe.enabled，默认关闭）：窗口内说过高度相似的话就拦一次。
+    // 原因：反复说同一句是群里最容易被认成机器人的特征，比句式问题更伤「像人」。
+    // 短句不判重：「嗯」「好」这类短回复重复是正常交流，拦了反而说不出话。
+    if (cfg.socialV2?.dedupe?.enabled === true && raw.length >= 8) {
+      const st = getSocialV2State(key);
+      const history = (Array.isArray(st.recentMessages) ? st.recentMessages : [])
+        .filter((m) => m && m.isSelf)
+        .slice(-10)
+        .map((m) => ({ text: String(m.tail || m.plain || m.text || ''), at: Number(m.time) || 0 }))
+        .filter((m) => m.text && m.at > 0);
+      const verdict = runGuard('dedupe', () => isDuplicate(raw, history, {
+        now: Date.now(),
+        windowMs: Number(cfg.socialV2.dedupe.windowMs) > 0 ? Number(cfg.socialV2.dedupe.windowMs) : 600000,
+        similarity: Number(cfg.socialV2.dedupe.similarity) > 0 ? Number(cfg.socialV2.dedupe.similarity) : 0.9
+      }), { duplicate: false });
+      if (verdict.duplicate) {
+        appendActivity(`[dedupe] blocked (${key})`);
+        return { ok: false, text: raw, reason: 'outbound guard: 你刚说过几乎一样的话，换个说法，或者这次先不说' };
+      }
+    }
     // 元信息 + 称呼越界：判定在 src/guards/outbound-content.js（12 条单测覆盖），
     // 这里只按返回的 kind 记账；「老爹→你」的改写也由模块给出。
     {
@@ -10883,12 +10907,28 @@ async function main() {
       return false;
     }
     const maxAgeHours = Number(rot.maxAgeHours) > 0 ? Number(rot.maxAgeHours) : 24;
-    if (Date.now() - createdAt < maxAgeHours * 3600 * 1000) return false;
-    // 只在对话间隙换：聊天中退役会打断正在进行的话题。
+    const IDLE_MS = 10 * 60 * 1000;
     try {
       const st = getSocialV2State(key);
-      const idleMs = Date.now() - Number(st.lastIncomingAt || 0);
-      return idleMs > 10 * 60 * 1000;
+      const now = Date.now();
+      const lastIncomingAt = Number(st.lastIncomingAt || 0);
+      const decided = now - createdAt >= maxAgeHours * 3600 * 1000 && now - lastIncomingAt > IDLE_MS;
+      // 影子对比：模块判定与现实现不一致时记一条，便于以后把策略切到模块上（当前不影响行为）。
+      try {
+        const shadow = shouldRotate({
+          createdAt,
+          lastIncomingAt,
+          now,
+          maxAgeMs: maxAgeHours * 3600 * 1000,
+          idleMs: IDLE_MS,
+          enabled: true,
+          isOwnerKey: true
+        });
+        if (shadow.rotate !== decided) {
+          log(`[rotation] 影子不一致：现实现=${decided} 模块=${shadow.rotate}（${shadow.reason}）`);
+        }
+      } catch {}
+      return decided;
     } catch {
       return false;
     }
@@ -11602,13 +11642,30 @@ async function main() {
     const defaultMs = Number(cfg.socialV2?.wait?.defaultQuietMs) || 8000;
     if (!st) return defaultMs;
     const recent = Array.isArray(st.recentMessages) ? st.recentMessages : [];
+    const burst = recent.filter((m) => m && !m.isSelf && Date.now() - Number(m.time || 0) < 15000).length;
     const last = [...recent].reverse().find((m) => m && !m.isSelf);
-    if (!last) return defaultMs;
+    // 自适应等待（socialV2.wait.adaptive，默认关闭）：只在「普通情况」生效，
+    // 「对方没说完」和「连发 3 条」这两条关键规则仍优先返回 12s，不受自适应影响。
+    // 关闭时行为与原来完全一致（8000 / 12000 离散档位）。
+    const adaptive = () => {
+      if (cfg.socialV2?.wait?.adaptive !== true) return defaultMs;
+      const ap = cfg.socialV2?.wait?.adaptiveParams ?? {};
+      const result = nextInterval({
+        activity: Math.min(1, 0.2 + burst * 0.2),
+        baseMs: defaultMs,
+        minMs: Number(ap.minMs) > 0 ? Number(ap.minMs) : 6000,
+        maxMs: Number(ap.maxMs) > 0 ? Number(ap.maxMs) : 15000,
+        jitterRatio: Number.isFinite(Number(ap.jitterRatio)) ? Number(ap.jitterRatio) : 0.15,
+        random: Math.random()
+      });
+      log(`[wait] 自适应 ${result.ms}ms（${result.reason}）`);
+      return result.ms;
+    };
+    if (!last) return adaptive();
     const text = String(last.tail || last.plain || last.text || '').trim();
     if (looksLikeUnfinished(text)) return 12000;
-    const burst = recent.filter((m) => m && !m.isSelf && Date.now() - Number(m.time || 0) < 15000).length;
     if (burst >= 3) return 12000;
-    return defaultMs;
+    return adaptive();
   }
 
   function formatMemoryV2(st) {
@@ -11733,13 +11790,14 @@ async function main() {
     const kind = text.startsWith('group:') ? 'group' : 'private';
     const isOwner = kind === 'private' && text === `private:${String(cfg.ownerQQ ?? '')}`;
     if (kind === 'private' && !isOwner) return '';
-    return formatRelationBlock(readRelationsFile(), {
-      key: text,
-      kind,
-      isOwner,
-      now: Date.now(),
-      maxChars: 400
+    // 关系线按「新近 + 反复提及」的衰减分取前 8 条：条目多了旧的先让位。
+    // 排序只在当前会话内做（flatten 已按 key 过滤），不会把别人的私事带进来。
+    const store = createRelationStore({
+      read: readRelationsFile,
+      write: (next) => atomicWriteJson(RELATIONS_FILE, next),
+      now: () => Date.now()
     });
+    return store.formatForPrompt(8, { key: text, kind, isOwner, maxChars: 400 });
   }
 
   // ── 记忆三件套（agenda / profile / selfview）────────────────────────────
