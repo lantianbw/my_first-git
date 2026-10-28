@@ -112,6 +112,7 @@ import { createRelationStore } from './content/relation-store.js';
 import { nextInterval } from './scheduler/interval.js';
 import { shouldRotate } from './session/expiry.js';
 import { isDuplicate } from './outbound/dedupe.js';
+import { splitText } from './outbound/split.js';
 import { judge as costJudge } from './cost/gate.js';
 import { evaluateLengthNudge } from './guards/length.js';
 import { evaluateContent } from './guards/outbound-content.js';
@@ -9256,8 +9257,20 @@ async function main() {
     const safeMsg = redactKnownTokensOnly(msg);
     const [kind, id] = key.split(':');
     const parts = splitForQQ(safeMsg);
+    // 表达切分（socialV2.replySplit.enabled，默认关闭）：一条长回复改成 2~4 条短消息连发，
+    // 比一大段更接近真人打字。只在 splitForQQ 没切开（单段）且超过 maxChars 时生效，
+    // 不影响 QQ 单条上限的技术切分。
+    const replySplit = cfg.socialV2?.replySplit ?? {};
+    const splitParts = (replySplit.enabled === true && parts.length === 1)
+      ? (() => {
+          const maxChars = Number(replySplit.maxChars) > 0 ? Number(replySplit.maxChars) : 120;
+          if ([...(parts[0] ?? '')].length <= maxChars) return parts;
+          const result = splitText(parts[0], { maxChars, maxParts: Number(replySplit.maxParts) > 0 ? Number(replySplit.maxParts) : 4 });
+          return result.parts.length > 1 ? result.parts : parts;
+        })()
+      : parts;
     lastSendFailed.delete(key);
-    for (const part of parts) {
+    for (const part of splitParts) {
       sendChain = sendChain
         .then(async () => {
           assertSendAllowed();
