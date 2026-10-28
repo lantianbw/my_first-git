@@ -7299,8 +7299,12 @@ async function main() {
           // 人读版报表（纯文本表格）：同一个 summary 数据的另一种呈现，只读、仅控制台。
           if (req.method === 'GET' && url.pathname === '/api/tokens/report') {
             const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 200));
+            const reportSummary = tokenLedger.summary({ limit });
+            // 口径提醒：summary 是账本累计（跨天），而 costGate 判的是「今日」。
+            // 只看累计会误以为已经超了硬停线，所以把今日花费一并带给报表。
+            try { reportSummary.todayCost = Number(tokenLedger.spentToday?.() ?? 0) || 0; } catch { reportSummary.todayCost = 0; }
             res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', ...SECURITY_HEADERS });
-            res.end(renderSummary(tokenLedger.summary({ limit })));
+            res.end(renderSummary(reportSummary));
             return;
           }
           if (req.method === 'GET' && url.pathname === '/api/tokens/series') {

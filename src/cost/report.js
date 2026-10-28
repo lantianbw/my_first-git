@@ -161,8 +161,13 @@ export function renderSummary(summary) {
     compact(r.tokens)
   ]);
 
+  // 口径提醒：本表的「合计」是账本累计（可能跨天），而 costGate 判的是「今日」。
+  // 调用方若带上 todayCost，就在标题里并列显示，避免把累计当成今日而误判是否已超熔断线。
+  const todayCost = Number(src.todayCost);
+  const todayText = Number.isFinite(todayCost) && todayCost >= 0 ? ` · 今日 ${money(todayCost)}` : '';
+
   const lines = [
-    `会话成本摘要 · ${rows.length} 个会话 · 合计 ${money(totalCost)}`,
+    `会话成本摘要 · ${rows.length} 个会话 · 合计 ${money(totalCost)}${todayText}`,
     ...tableOf(
       ['会话', '花费', '占比', '轮次', 'tokens'],
       body,
