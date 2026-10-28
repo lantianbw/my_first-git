@@ -113,6 +113,7 @@ import { nextInterval } from './scheduler/interval.js';
 import { shouldRotate } from './session/expiry.js';
 import { isDuplicate } from './outbound/dedupe.js';
 import { splitText } from './outbound/split.js';
+import { createRateLimiter } from './outbound/rate.js';
 import { judge as costJudge } from './cost/gate.js';
 import { evaluateLengthNudge } from './guards/length.js';
 import { evaluateContent } from './guards/outbound-content.js';
@@ -9252,8 +9253,28 @@ async function main() {
   // 更新 lastAiReplyAt / 活跃调度，实际群里什么都没收到，而且只有一行滚动日志能看出问题。
   const lastSendFailed = new Map(); // key -> true（下一次成功即清除）
 
+  // 发送频率限流器（socialV2.sendRate.enabled，默认关闭）：按会话各一个实例，
+  // 参数变化时重建，避免改配置后需重启。
+  const sendLimiters = new Map();
+  function sendLimiterFor(key) {
+    const rateCfg = cfg.socialV2?.sendRate ?? {};
+    const windowMs = Number(rateCfg.windowMs) > 0 ? Number(rateCfg.windowMs) : 60000;
+    const max = Number(rateCfg.max) > 0 ? Number(rateCfg.max) : 8;
+    const sig = `${windowMs}:${max}`;
+    const current = sendLimiters.get(key);
+    if (current && current.sig === sig) return current.limiter;
+    const limiter = createRateLimiter({ windowMs, max, now: () => Date.now() });
+    sendLimiters.set(key, { sig, limiter });
+    return limiter;
+  }
+
   function sendToQQ(key, msg) {
     const assertSendAllowed = captureSendGuard(key);
+    // 频率上限：超出后丢弃这一条并记日志，不排队（排队会让回复越来越晚）。
+    if (cfg.socialV2?.sendRate?.enabled === true && !sendLimiterFor(key).allow()) {
+      log(`[rate] 发送频率超限，丢弃一条 (${key})`);
+      return sendChain;
+    }
     const safeMsg = redactKnownTokensOnly(msg);
     const [kind, id] = key.split(':');
     const parts = splitForQQ(safeMsg);
