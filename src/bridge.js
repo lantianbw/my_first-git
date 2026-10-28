@@ -8162,6 +8162,70 @@ async function main() {
           }
           return;
         }
+        if (req.method === 'GET' && url.pathname === '/api/socialV2/rotation/preview') {
+          // 轮换预演：只读，不写 state、不写归档文件、不动 DSH 会话。
+          // 用来在真轮换发生前确认「归档里有什么、回注会不会是空的」。
+          if (req.headers['x-agent-token']) { sendJson({ ok: false, error: '轮换预演仅控制台可用' }, 403); return; }
+          try {
+            const rawKey = String(url.searchParams.get('key') ?? '').trim()
+              || (cfg.ownerQQ ? `private:${Number(cfg.ownerQQ)}` : '');
+            const targetKey = canonicalV2Key(rawKey);
+            if (!targetKey) { sendJson({ ok: false, error: `key 无效：${rawKey}` }, 400); return; }
+            const rot = cfg.socialV2?.sessionRotation ?? {};
+            const maxAgeHours = Number(rot.maxAgeHours) > 0 ? Number(rot.maxAgeHours) : 24;
+            const IDLE_MS = 10 * 60 * 1000;
+            const createdAt = Number(state.sessionMeta?.[targetKey]?.createdAt) || 0;
+            const st = getSocialV2State(targetKey);
+            const lastIncomingAt = Number(st.lastIncomingAt) || 0;
+            const nowMs = Date.now();
+            // 归档快照：口径与 archiveRotatedSession 保持一致，但这里只算不写。
+            const clip = (value, n) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, n);
+            const topics = (Array.isArray(st.activeTopics) ? st.activeTopics : [])
+              .filter((t) => t && t.text)
+              .slice(-20)
+              .map((t) => ({ text: clip(t.text, 120) }));
+            const recent = (Array.isArray(st.recentMessages) ? st.recentMessages : [])
+              .slice(-40)
+              .map((m) => ({ self: m?.isSelf === true, text: clip(m?.tail || m?.plain || m?.text || '', 200) }))
+              .filter((m) => m.text);
+            const memoryText = String(formatMemoryV2(st) ?? '');
+            const relationText = String(relationBlockV2(targetKey) ?? '');
+            const ageOkAt = createdAt ? createdAt + maxAgeHours * 3600 * 1000 : null;
+            const idleOkAt = lastIncomingAt ? lastIncomingAt + IDLE_MS : null;
+            const gates = [ageOkAt, idleOkAt].filter((n) => Number.isFinite(n));
+            const readyAt = gates.length ? Math.max(...gates) : null;
+            sendJson({
+              ok: true,
+              key: targetKey,
+              rotation: {
+                enabled: rot.enabled === true,
+                maxAgeHours,
+                createdAt,
+                ageOkAt,
+                lastIncomingAt,
+                idleOkAt,
+                now: nowMs,
+                shouldRotateNow: rot.enabled === true && Boolean(createdAt)
+                  && nowMs >= (ageOkAt ?? Infinity) && nowMs - (idleOkAt ?? 0) > 0,
+                remainingMs: readyAt ? Math.max(0, readyAt - nowMs) : null
+              },
+              archive: {
+                topics: topics.length,
+                recent: recent.length,
+                memoryChars: [...memoryText].length,
+                relationChars: [...relationText].length
+              },
+              recallPreview: [
+                memoryText ? `【记忆 ${[...memoryText].length} 字】` : '【记忆 空】',
+                ...recent.slice(-6).map((m) => `- ${m.self ? '你' : '对方'}：${m.text.slice(0, 40)}`),
+                relationText ? `【关系线 ${[...relationText].length} 字】` : '【关系线 空】'
+              ].join('\n').slice(0, 800)
+            });
+          } catch (error) {
+            sendJson({ ok: false, error: `轮换预演失败：${error?.message ?? error}` }, 500);
+          }
+          return;
+        }
         if (req.method === 'GET' && url.pathname === '/api/socialV2/memory') {
           const key = String(url.searchParams.get('key') ?? '').trim();
           const category = String(url.searchParams.get('category') ?? '').trim();
