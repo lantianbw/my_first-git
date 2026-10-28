@@ -12237,6 +12237,15 @@ async function main() {
         return { lastEventAt: 0, unreadBacklog: 0 };
       }
     })();
+    // 成本阈值必须与桥自己的闸门（socialV2.costGate，缺省 ¥10 预警 / ¥15 硬停）对齐。
+    // 模块默认是 ¥50 的 85%（=¥42.5），而桥在 ¥15 就已经硬停 —— 不对齐的话这个维度
+    // 永远判不到 degraded，等于白接。
+    const shadowCostLimits = (() => {
+      const gate = cfg.socialV2?.costGate ?? {};
+      const stop = Number(gate.stop) > 0 ? Number(gate.stop) : 15;
+      const warn = Number(gate.warn) > 0 ? Number(gate.warn) : 10;
+      return { costDailyLimit: stop, costWarnRatio: Math.min(1, warn / stop) };
+    })();
     try {
       const shadowHealth = judgeHealth({
         dshOk: Boolean(dshUp),
@@ -12245,6 +12254,7 @@ async function main() {
         lastEventAt: shadowInput.lastEventAt,
         unreadBacklog: shadowInput.unreadBacklog,
         costToday: Number(tokenLedger.spentToday?.() ?? 0) || 0,
+        limits: shadowCostLimits,
         now: now.getTime()
       });
       if ((shadowHealth.level === 'healthy') !== (status === 'OK')) {
@@ -13875,11 +13885,15 @@ async function main() {
   let triggerShadowCount = 0;
   function triggerShadowFlush(now) {
     if (!triggerStats.windowStart) { triggerStats.windowStart = now; return; }
-    if (now - triggerStats.windowStart < 300_000) return;
-    const total = triggerStats.compared + triggerStats.skipped;
-    if (total > 0) {
-      log(`[triggers] 影子近 5 分钟：可比 ${triggerStats.compared} 次`
-        + `（一致 ${triggerStats.same} / 分歧 ${triggerStats.diff}），跳过 ${triggerStats.skipped} 次`);
+    const spanMs = now - triggerStats.windowStart;
+    if (spanMs < 300_000) return;
+    // 群里长时间没消息时，这几个样本是几小时前的，写成「近 5 分钟」会误导排查 —— 直接丢弃。
+    if (spanMs <= 1_800_000) {
+      const total = triggerStats.compared + triggerStats.skipped;
+      if (total > 0) {
+        log(`[triggers] 影子近 ${Math.round(spanMs / 60000)} 分钟：可比 ${triggerStats.compared} 次`
+          + `（一致 ${triggerStats.same} / 分歧 ${triggerStats.diff}），跳过 ${triggerStats.skipped} 次`);
+      }
     }
     triggerStats.windowStart = now;
     triggerStats.compared = 0;
@@ -13905,14 +13919,10 @@ async function main() {
         return;
       }
       const tr = st.wakeConfig?.triggers ?? {};
-      if (Array.isArray(tr.speakerIds) && tr.speakerIds.length) {
-        triggerStats.skipped += 1;
-        return;
-      }
-      if (Number(tr.probability) > 0) {
-        triggerStats.skipped += 1;
-        return;
-      }
+      // 不要因为「配置里有 speakerIds / probability」就整体跳过：这两个维度只在前面
+      // 所有条件都没命中时才会执行，所以只有 reason 恰好是 'speaker:*' / 'probability'
+      // 时才不可比 —— 而它们在上一行的正则里已经被挡掉了。若在此处整体跳过，
+      // 配了 probability 的群（本群就有）会永远只记「跳过」，影子形同虚设。
       if (sleepGateCfg().enabled !== false && computeSleepGate(new Date(), sleepGateCfg()).asleep) {
         triggerStats.skipped += 1;
         return;
