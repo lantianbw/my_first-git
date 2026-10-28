@@ -102,6 +102,16 @@ export const DEFAULT_PRICE_TABLE = {
       label: 'DeepSeek-V4.1-Flash（旧模型名）',
       off: { cacheHit: 0.02, cacheMiss: 1, cacheWrite: 1, output: 4 }
     },
+    // 2026-10-26 按真实券账单反推：百炼对 DeepSeek 的缓存命中约 0.24 元/百万
+    // （官方表价 0.02，差 12 倍）。此前用 0.02 会让成本报告严重低估。
+    'deepseek-v4.1-flash-1017': {
+      label: 'DeepSeek-V4.1-Flash-1017（百炼，命中价按账单反推）',
+      off: { cacheHit: 0.24, cacheMiss: 1, cacheWrite: 1, output: 4 }
+    },
+    'deepseek-v4-flash-0731': {
+      label: 'DeepSeek-V4-Flash-0731（百炼，命中价按账单反推）',
+      off: { cacheHit: 0.24, cacheMiss: 1, cacheWrite: 1, output: 4 }
+    },
     'deepseek-v4-flash-vision-exp': {
       label: 'DeepSeek-V4.1-Flash（视觉实验名）',
       off: { cacheHit: 0.02, cacheMiss: 1, cacheWrite: 1, output: 4 }

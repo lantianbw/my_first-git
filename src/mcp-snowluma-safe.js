@@ -20,6 +20,7 @@ import { z } from 'zod';
 import { SENSITIVE_RE } from './sensitive.js';
 import { serializeModelData } from './qq-model-view.js';
 import { formatOcrResult, formatVoiceTextResult, formatMediaToolError } from './media-tools.js';
+import { searchWebImage } from './web-sticker.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -330,6 +331,9 @@ const TOOL_CONFIG_FLAGS = {
   qq_slang_submit: 'slangSubmit',
   qq_send_voice: 'sendVoice',
   qq_list_voices: 'sendVoice',
+  // qq_speak（TTS 合成后直接发）：注册期开关 = voice.enabled + tools.speak。
+  // 同 sendVoice 的教训：开关关了就必须连 schema 一起隐藏，否则模型看得见、调了拿 403。
+  qq_speak: 'speak',
   // 下面这些曾经漏登记。漏一个不是"多注册一个工具"那么轻：桥接那边按 `v2ToolEnabled(flag)`
   // 在**调用期**一律 403，而这里不登记就等于"控制台显示已关闭、模型每次请求仍收到它的完整
   // 描述与参数 schema，然后调用它、再拿到 403"——既白烧 token（本文件开头 176 行起就是为省这份
@@ -814,9 +818,10 @@ server.tool(
     purpose: z.enum(['messages', 'reply']).optional().describe('默认 messages：等新消息/回复/睡前观察；reply：回复前短静默，计入最后来信后已过去的时间，绝不授予睡前观察资格'),
     timeoutMs: z.number().optional().describe('等待预算毫秒数，默认 30000、最大 600000；reply 达到静默即返回，不必等满；沉睡前观察用 messages 并传 300000'),
     minNewMessages: z.number().optional().describe('仅 messages 用途：至少等到多少条新消息才进入静默窗口，默认 1；reply 用途会忽略它'),
-    quietMs: z.number().optional().describe('静默窗口毫秒数，建议 10000~12000；reply 从最后来信开始计时，messages 只在等到新消息后计时；后台默认至少 10000')
+    quietMs: z.number().optional().describe('静默窗口毫秒数，建议 10000~12000；reply 从最后来信开始计时，messages 只在等到新消息后计时；后台默认至少 10000'),
+    autoMarkRead: z.boolean().optional().describe('传 true 时按本次返回的 readThroughSeq 自动标记已读，省掉一次 qq_mark_read 调用；默认 false。适合「看完就收尾」的场景，沉睡前观察仍建议显式 mark_read 以便确认水位')
   },
-  async ({ key, token, purpose, timeoutMs, minNewMessages, quietMs }) => {
+  async ({ key, token, purpose, timeoutMs, minNewMessages, quietMs, autoMarkRead }) => {
     try {
       // 必须走长轮询通道：全局 fetch（undici）有 300s headersTimeout，
       // 而沉睡前观察的预算就是 300s（见 agentApiLongPoll 的说明）。
@@ -826,6 +831,24 @@ server.tool(
         headers: { 'x-agent-token': token },
         timeoutMs: Math.min(725000, (Number(timeoutMs) || 30000) + Math.max(Number(quietMs) || 0, 10000) + 20000)
       });
+      // 可选：同一次调用顺势标记已读，省掉紧跟其后的 qq_mark_read。
+      // 只用本次返回的 readThroughSeq 作水位，不会清掉读取之后才到达的新消息。
+      if (autoMarkRead === true && data && typeof data === 'object') {
+        const out = { ...data };
+        const seq = Number(out.readThroughSeq);
+        if (Number.isFinite(seq)) {
+          try {
+            out.markRead = await agentApi('/api/socialV2/mark-read', {
+              method: 'POST',
+              body: JSON.stringify({ key, throughSeq: seq }),
+              headers: { 'x-agent-token': token }
+            });
+          } catch (error) {
+            out.markReadError = String(error?.message ?? error);
+          }
+        }
+        return { content: [{ type: 'text', text: serializeModelData(out) }] };
+      }
       return { content: [{ type: 'text', text: serializeModelData(data) }] };
     } catch (error) {
       return { content: [{ type: 'text', text: `等待失败：${error?.message ?? error}` }], isError: true };
@@ -1937,6 +1960,48 @@ if (cfg.socialV2?.voice?.enabled !== false && cfg.socialV2?.tools?.sendVoice !==
   );
 }
 
+// qq_speak：文字 → TTS（复刻音色）→ 语音条。与 qq_send_voice 的区别：那是发语音库里
+// **已有**的文件，这个是现场合成。开关独立于 sendVoice（socialV2.tools.speak）。
+//
+// 注册门槛用 `=== true`（不是其他工具的 `!== false`）：bridge 侧 speak 的**默认值是 false**
+// （bridge.js 的 socialV2.tools 默认表）。若这里沿用 `!== false`，旧配置缺这个 key 时
+// 工具会注册出来、模型看得见，一调用就被 bridge 403 —— 正是文件开头注释批评过的
+// 「显示已关闭、模型仍收到完整描述并误调」老坑。两边都按「没写 = 关」对齐。
+if (cfg.socialV2?.voice?.enabled !== false && cfg.socialV2?.tools?.speak === true) {
+  server.tool(
+    'qq_speak',
+    '把一句话用你的声音合成成 QQ 语音发出去（TTS 现场合成，不是发语音库里已有的文件）。text 是要念的内容（短句，别超过 120 字）。tone 可选：常用语气有 松快 / 闷 / 逗 / 生气 / 困 / 软（以桥配置 socialV2.voice.toneMap 为准）；不传时按当前心情自动选（moods.json 的心情词映射，深夜自动偏「困」）；传了映射表以外的词会当作自然语言语气描述直接使用（≤50 个汉字）。注意：① 同一句文字 + 同一语气 24 小时内复用已合成文件，不重复计费；② 每分钟最多 2 条、每小时最多 10 条，超限会被拒绝；③ 语音按字数计费（约 2 元/万字符，一句十几字约 0.003 元），别拿它刷屏；④ 返回 verified=true 才表示语音真的落地了（get_msg 回读到 record 段）；⑤ 合成失败/超限/文本被拦时会返回明确错误——这时请改用文字消息（qq_send_message / qq_reply），不要重试个不停，更不要假装发了语音。',
+    {
+      key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+      token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+      text: z.string().describe('要念出来的内容（短句，建议 ≤30 字，上限 120 字）'),
+      tone: z.string().optional().describe('可选语气：松快 / 闷 / 逗 / 生气 / 困 / 软，或自然语言语气描述；不传则按当前心情自动选'),
+      label: z.string().optional().describe('可选：写进会话记录里的说明，如「说了句晚安」'),
+      verify: z.boolean().optional().describe('是否回读校验语音已落地（默认 true，建议保持开启）')
+    },
+    async ({ key, token, text, tone, label, verify }) => {
+      try {
+        const data = await agentApi('/api/socialV2/speak', {
+          method: 'POST',
+          body: JSON.stringify({
+            key,
+            text: String(text),
+            tone: tone || '',
+            label: label || '',
+            verify: verify !== false,
+            token
+          }),
+          headers: { 'x-agent-token': token },
+          timeoutMs: 300000
+        });
+        return { content: [{ type: 'text', text: serializeModelData(data) }] };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `语音合成发送失败：${error?.message ?? error}（请改用文字消息）` }], isError: true };
+      }
+    }
+  );
+}
+
 if (cfg.socialV2?.tools?.getSelfImage !== false) {
   server.tool(
     'qq_get_self_image',
@@ -1991,6 +2056,130 @@ if (cfg.socialV2?.sticker?.enabled !== false && cfg.socialV2?.tools?.stickerNote
         return { content: [{ type: 'text', text: serializeModelData(data) }] };
       } catch (error) {
         return { content: [{ type: 'text', text: `记录表情备注失败：${error?.message ?? error}` }], isError: true };
+      }
+    }
+  );
+}
+
+// ── 跨会话带话（双向但单向收口）────────────────────────────────────────────
+// 规则由桥的 /api/socialV2/relay 统一判定（开关、令牌、会话存在、目标格式、方向、限频、
+// 文本），这里只做参数搬运；方向不合规时把后端那句人话原样给模型，别让它反复试。
+server.tool(
+  'qq_relay',
+  '把一句话带给另一个会话（一次只能带一句，禁止群发）。规则：在老爷爷（owner）私聊里，可以带给白名单内的任何人或群；在其他人的私聊里或群里，只能往回带给老爷爷本人（private:老爷爷的QQ号），其他人之间不能互相传话。只在确实需要转达时用；被拒绝时照原因说明一句就行，不要换个目标反复试。',
+  {
+    key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+    token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+    to: z.string().describe('要带给谁：group:群号 或 private:QQ号'),
+    text: z.string().describe('要带的那一句话（不要包含多条消息）')
+  },
+  async ({ key, token, to, text }) => {
+    try {
+      const data = await agentApi('/api/socialV2/relay', {
+        method: 'POST',
+        body: JSON.stringify({ key, to, text }),
+        headers: { 'x-agent-token': token }
+      });
+      return { content: [{ type: 'text', text: serializeModelData(data) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `带话失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+// ── 模块开关（小鲸鱼可自己开关增强项；核心模块 locked 关不掉）──────────────
+// 三条防呆（locked / owner / 限频）全在桥的 /api/socialV2/modules/toggle 里判定，
+// 这里只搬运参数；被拒绝时把后端那句人话原样给模型，别让它换个名字反复试。
+server.tool(
+  'qq_module_list',
+  '查看模块开关状态与级别（只读）。level=free 可以自己开关；owner 仅主人可改；locked 是地基（收发消息、鉴权、守卫链、日志等），任何情况都关不掉，不要尝试。',
+  {
+    key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+    token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）')
+  },
+  async ({ key, token }) => {
+    try {
+      const data = await agentApi(`/api/socialV2/modules?key=${encodeURIComponent(key)}`, {
+        method: 'GET',
+        headers: { 'x-agent-token': token }
+      });
+      return { content: [{ type: 'text', text: serializeModelData(data) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `读取模块失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'qq_module_toggle',
+  '开关一个模块。只能改 level=free 的模块；owner 级需要主人确认；locked 一律拒绝（返回「该模块不可关闭」时就此打住，不要换名字再试）。改完立刻生效，不需要重启。',
+  {
+    key: z.string().describe('会话 key'),
+    token: z.string().describe('会话令牌'),
+    name: z.string().describe('模块名，例如 guards/scorer'),
+    on: z.boolean().describe('true=打开，false=关闭'),
+    reason: z.string().optional().describe('一句话说明为什么改（建议写，会进审计）')
+  },
+  async ({ key, token, name, on, reason }) => {
+    try {
+      const data = await agentApi('/api/socialV2/modules/toggle', {
+        method: 'POST',
+        body: JSON.stringify({ key, name, on, reason }),
+        headers: { 'x-agent-token': token }
+      });
+      return { content: [{ type: 'text', text: serializeModelData(data) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `切换模块失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+// ── 网上找表情图（二期，默认关闭）─────────────────────────────────────────
+// 只有 config.json 里 socialV2.stickerWeb.enabled === true 才注册本工具；缺字段视为关闭，
+// 模型根本看不到它，也就无从联网。安全口径：
+//   · 先用现有 sticker-suggest 端点验会话令牌 + 白名单（owner 私聊 / 白名单群），过了才联网；
+//   · 抓取走 src/safe-fetch.js，字节按真实签名校验成 PNG/JPEG/GIF（单张 ≤1MB、总量 ≤3MB）；
+//   · 单日次数受 maxPerDay 限制；不写收藏表情库，也不把 URL 交给 QQ（只给本地 file 路径）。
+if (cfg.socialV2?.stickerWeb?.enabled === true) {
+  server.tool(
+    'qq_sticker_find',
+    `去网上搜一张表情图（默认关闭的能力，单日最多 ${Number(cfg.socialV2?.stickerWeb?.maxPerDay) || 3} 次）。返回候选的本地文件路径 file，挑一张再调 qq_send_image(file=...) 发出。图片已按真实字节校验为 PNG/JPEG/GIF，单张 ≤1MB。只在收藏表情都不合适时才用；找不到就把话说出来，不要向对方解释"搜图失败"。`,
+    {
+      key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+      token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+      query: z.string().describe('想找什么样的图，例如「无语 猫 表情包」「鼓掌 gif」「嘲笑的熊猫头」')
+    },
+    async ({ key, token, query }) => {
+      try {
+        // 先验会话：这一步失败就该拒绝，联网找图绝不能跑在未授权的会话里。
+        const probe = new URLSearchParams({ key, hint: '' });
+        await agentApi(`/api/socialV2/sticker-suggest?${probe.toString()}`, { headers: { 'x-agent-token': token } });
+
+        const results = await searchWebImage(query, { cfg: getConfig(), onLog: (message) => console.error(message) });
+        if (!results.length) {
+          return { content: [{ type: 'text', text: '这次没找到能用的图（或今日额度已用完）。直接用文字表达就好，不必向对方解释。' }] };
+        }
+        // 校验过的字节落到 images/ 目录，qq_send_image 才能按相对路径发送。
+        const dir = cfg.socialV2?.image?.dir || 'images';
+        const absDir = path.resolve(ROOT, dir);
+        fs.mkdirSync(absDir, { recursive: true });
+        const stamp = new Date().toISOString().replace(/[-:T.]/g, '').slice(0, 14);
+        const candidates = [];
+        for (let i = 0; i < Math.min(results.length, 3); i += 1) {
+          const item = results[i];
+          const ext = item.mimeType === 'image/png' ? 'png' : item.mimeType === 'image/gif' ? 'gif' : 'jpg';
+          const name = `web-sticker-${stamp}-${i + 1}.${ext}`;
+          fs.writeFileSync(path.join(absDir, name), item.buffer);
+          candidates.push({ file: name, mimeType: item.mimeType, bytes: item.buffer.length, url: item.url });
+        }
+        return {
+          content: [{
+            type: 'text',
+            text: serializeModelData({ candidates, note: '挑一张最贴切的，用 qq_send_image(file=候选的 file) 发出；都不合适就改用文字。' })
+          }]
+        };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `联网找图不可用：${error?.message ?? error}。直接用文字表达即可。` }] };
       }
     }
   );

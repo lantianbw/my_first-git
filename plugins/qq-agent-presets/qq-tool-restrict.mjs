@@ -199,13 +199,26 @@ export function apply(ctx) {
   // 是**各 preset 行自己注册的 scoped 工具**，在 QQ preset 里根本没挂载，
   // 因此本名单主要防的是"别的 composition 把它们注册进全局层"这种回归，
   // 以及 MCP 之外的宿主工具（plugin-guard / cordis 检查工具等）。
+  // 两类失败分开记账：
+  //   · 「名字在本机不存在」= 正常现象（不同 profile 的全局工具集不同，服务器 web profile
+  //     只有 4 个全局工具），逐个打 warn 会刷出上百条纯噪音，因此只在最后汇总一行；
+  //   · 其它错误（restrict 自身出问题）= 真的需要人看，仍然逐条 warn。
+  // restrict 与 guard 的语义不变：名字不存在时跳过该条 restrict，执行期白名单照样兜底。
+  const missingNames = []
   for (const name of KNOWN_DANGEROUS_GLOBAL_TOOLS) {
     try {
       ctx.tools.restrict({ deny: [name] })
     } catch (error) {
-      // 名字不存在时跳过；执行期白名单仍然兜底。
-      console.error(`[qq-tool-restrict] skip restrict ${name}: ${error?.message ?? error}`)
+      const detail = String(error?.message ?? error)
+      if (/unknown|not\s*found|not\s*exist|no\s*such|不存在/i.test(detail)) {
+        missingNames.push(name)
+        continue
+      }
+      console.error(`[qq-tool-restrict] restrict ${name} 失败：${detail}`)
     }
+  }
+  if (missingNames.length) {
+    console.error(`[qq-tool-restrict] ${missingNames.length} 个名字在本机不存在（属正常，按 profile 不同）`)
   }
 
   // 2) 执行期白名单：任何不在允许范围内的工具调用都会被拒绝。

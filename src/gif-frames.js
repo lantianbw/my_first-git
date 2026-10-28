@@ -10,6 +10,17 @@
 import { parseGIF, decompressFrames } from 'gifuct-js';
 import { PNG } from 'pngjs';
 
+// 契约门面（docs/module-contract.md B.1 / G 表）：只声明身份与开关级别；
+// 具体能力仍由下面的 @pure 纯函数提供，调用方直接用（纯函数例外，不强制 handle）。
+export const spec = Object.freeze({
+  name: 'inbound/gif',
+  version: '1.0.0',
+  deps: Object.freeze([]),
+  optionalDeps: Object.freeze([]),
+  guards: Object.freeze([]),
+  toggle: Object.freeze({ level: 'free', default: true, hot: true })
+});
+
 const GIF_HEADERS = ['GIF87a', 'GIF89a'];
 const PAD = 4;            // 格间白边（px）
 const MAX_COLS = 3;       // 3 列优先

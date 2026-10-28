@@ -140,7 +140,8 @@
       "stickerNote": true,
       "collectSticker": true,
       "getSelfImage": true,
-      "sendVoice": false
+      "sendVoice": false,
+      "speak": false
     },
     "wake": {
       "defaultMode": "diving",
@@ -228,7 +229,33 @@
       "defaultVolume": 1,
       "loudness": "normal",
       "ffmpegPath": "",
-      "autoReadback": true
+      "autoReadback": true,
+      "tts": {
+        "model": "cosyvoice-v3.5-plus",
+        "voiceId": "换成你复刻出的 voice_id",
+        "baseUrl": "https://<你的工作区ID>.cn-beijing.maas.aliyuncs.com",
+        "apiKeyEnv": "BAILIAN_API_KEY",
+        "credentialsFile": "~/.dsh/.credentials.yaml",
+        "apiKeyRef": "BAILIAN_API_KEY",
+        "format": "wav",
+        "sampleRate": 24000,
+        "timeoutMs": 90000,
+        "maxChars": 120,
+        "maxBytes": 10485760,
+        "cacheTtlMs": 86400000,
+        "keepFiles": 200,
+        "pricePer10kChars": 2,
+        "dir": "tts"
+      },
+      "toneMap": {
+        "松快/轻快/开心/高兴/心情好/得劲": "语气轻快，语速稍微快一点，尾音上扬",
+        "闷/低落/难过/难受/烦/没劲/没意思": "语速放慢，声音压低，句子说短一点",
+        "逗/好笑/被逗到/想笑/乐/搞笑": "带着憋笑的感觉说，气息有点不稳",
+        "生气/恼/火大/气死/气人": "语速快，音量抬高，语气冲一点",
+        "困/深夜/想睡/犯困/瞌睡": "含糊一点，尾音拖长，语速放慢，像快睡着了",
+        "软/温柔/撒娇/软下来": "声音放软，轻声说，温柔一点",
+        "默认/自然": "自然地说"
+      }
     },
     "proactive": {
       "enabled": true,

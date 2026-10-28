@@ -21,6 +21,7 @@ import * as ecoLib from '../src/eco-lib.js';
 import * as modelPrices from '../src/model-prices.js';
 import * as tokenLedger from '../src/token-ledger.js';
 import * as voiceLib from '../src/send-voice-lib.js';
+import * as ttsLib from '../src/tts-lib.js';
 import * as presetPrompt from '../src/preset-prompt.js';
 import * as stateAcl from '../src/state-acl.mjs';
 import * as crossKey from '../src/cross-key.js';
@@ -177,7 +178,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     discoverDshLaunchToken: () => '', unwrap, createTurnCollector,
     ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...slang, ...sticker,
     ...memeLib, ...ecoLib,
-    ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...presetPrompt, ...crossKey, ...forwardApproval, ...mediaCache, ...mediaTools, ...relations, ...memo, ...diary, ...mood, ...ownerStats, ...samples, ...dshPort,
+    ...modelPrices, ...tokenLedger, ...voiceLib, ...ttsLib, ...stateAcl, ...presetPrompt, ...crossKey, ...forwardApproval, ...mediaCache, ...mediaTools, ...relations, ...memo, ...diary, ...mood, ...ownerStats, ...samples, ...dshPort,
     // ACL 收紧会 spawn icacls 去改**真实**文件系统；测试不该做这件事（同理见下面的
     // cleanupTemp / processAudioVolume 桩）。桩成成功，让 hardenStateDirAcl 走正常分支。
     hardenDir: () => ({ ok: true, detail: 'stub' }),

@@ -939,10 +939,32 @@ export function createTokenLedger({
     lastIngestAt = 0;
   }
 
+  /**
+   * 今日（本地自然日）已花费，只读。用于成本闸门的预警/硬停判断。
+   * 口径：按采样时刻落在今日零点之后的样本累加；被淘汰（evicted）的样本与桥接启动前
+   * 的 baseline 不计入，所以是**下限**（宁可低估也不高估），不会把正常用量误判成超支。
+   */
+  function spentToday(at = now()) {
+    const d = new Date(Number(at) || now());
+    const start = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+    let total = 0;
+    for (const s of samples.values()) {
+      const t = Number(s.t);
+      if (!Number.isFinite(t) || t < start) continue;
+      try {
+        total += priceUsage(s.buckets, { model: s.model, at: t, table: priceTable })?.cost?.total ?? 0;
+      } catch {
+        // 单条计价失败只跳过：闸门判断不能因为一条脏数据整体抛错
+      }
+    }
+    return total;
+  }
+
   load();
 
   return {
     ingestEvent,
+    spentToday,
     ingestBaseline,
     ingestSnapshotRecords,
     summary,

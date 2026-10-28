@@ -39,6 +39,8 @@ const CACHE_TTL_MS = 5 * 60 * 1000;
 const CACHE_MAX_ENTRIES = 64;
 // Anthropic 兼容响应里文本块/结果块都可能有；这里只要结构化结果。
 const SEARCH_TOOL_TYPE = 'web_search_20250305';
+// 时效偏好：默认让模型优先看最近 30 天（查热梗/近期新闻时最关键），调用方可覆盖。
+const DEFAULT_RECENCY_DAYS = 30;
 
 const defaultConfig = Object.freeze({
   provider: 'auto',
@@ -49,6 +51,7 @@ const defaultConfig = Object.freeze({
   maxUses: 5,
   maxTokens: 4096,
   maxResults: 8,
+  recencyDays: DEFAULT_RECENCY_DAYS,
   timeoutMs: DEFAULT_TIMEOUT_MS
 });
 
@@ -77,6 +80,7 @@ export function loadSearchConfig(root) {
     maxUses: num(raw.maxUses, defaultConfig.maxUses, 1, 5),
     maxTokens: num(raw.maxTokens, defaultConfig.maxTokens, 256, 8192),
     maxResults: num(raw.maxResults, defaultConfig.maxResults, 1, 20),
+    recencyDays: num(raw.recencyDays, defaultConfig.recencyDays, 1, 3650),
     timeoutMs: num(raw.timeoutMs, defaultConfig.timeoutMs, 5000, 120000)
   };
 }
@@ -285,21 +289,49 @@ async function postJson(url, addresses, options) {
   throw lastError ?? new Error('联网搜索请求失败');
 }
 
+/** 今天（东八区）的 YYYY-MM-DD：搜"近期"必须按北京时间的日历算，不能跟着进程时区跑。 */
+export function shanghaiDate(at = Date.now()) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).format(at);
+}
+
+/**
+ * 组装发给搜索端的 user content：固定时效前缀 + 原查询。
+ * 原查询**完整保留在末尾**，不裁不改，便于服务端按 query 匹配与回溯。
+ */
+export function buildSearchPrompt(query, recencyDays = DEFAULT_RECENCY_DAYS, at = Date.now()) {
+  const days = num(recencyDays, DEFAULT_RECENCY_DAYS, 1, 3650);
+  return `当前日期：${shanghaiDate(at)}。请优先检索最近 ${days} 天的内容，回答里注明时间。\n\nPerform a web search for the query: ${query}`;
+}
+
+/** 搜索日志：走 stderr，与桥的其它诊断日志同一条流。 */
+function logSearch(message) {
+  try {
+    console.error(message);
+  } catch {}
+}
+
 /** DeepSeek 原生联网搜索。失败时抛出带稳定 code 的错误，由调用方决定是否回退。 */
-export async function deepseekSearch(query, config = defaultConfig) {
+export async function deepseekSearch(query, config = defaultConfig, transport = { validate: validateSearchEndpoint, post: postJson }) {
   const { key } = resolveSearchApiKey(config);
   if (!key) {
     throw Object.assign(new Error('没有可用的 DeepSeek API key'), { code: 'NO_KEY' });
   }
   const baseURL = config.baseURL || process.env.DEEPSEEK_SEARCH_BASE_URL || DEFAULT_BASE_URL;
-  const { url, addresses } = await validateSearchEndpoint(baseURL);
+  const { url, addresses } = await transport.validate(baseURL);
   const endpoint = new URL(`${url.toString().replace(/\/+$/, '')}/messages`);
+  const recencyDays = num(config.recencyDays, DEFAULT_RECENCY_DAYS, 1, 3650);
+  logSearch(`[web-search] query="${String(query ?? '').replace(/"/g, "'")}" recency=${recencyDays}`);
   const body = JSON.stringify({
     model: config.model || DEFAULT_MODEL,
     max_tokens: config.maxTokens || defaultConfig.maxTokens,
     messages: [{
       role: 'user',
-      content: [{ type: 'text', text: `Perform a web search for the query: ${query}` }]
+      content: [{ type: 'text', text: buildSearchPrompt(query, recencyDays) }]
     }],
     tools: [{
       type: SEARCH_TOOL_TYPE,
@@ -307,7 +339,7 @@ export async function deepseekSearch(query, config = defaultConfig) {
       max_uses: config.maxUses || defaultConfig.maxUses
     }]
   });
-  const response = await postJson(endpoint, addresses, {
+  const response = await transport.post(endpoint, addresses, {
     headers: {
       'x-api-key': key,
       authorization: `Bearer ${key}`,
@@ -446,8 +478,10 @@ export async function webSearch(query, options = {}) {
   const q = String(query ?? '').trim();
   if (!q) throw new Error('查询词为空');
   const config = { ...loadSearchConfig(options.root ?? process.cwd()), ...(options.config ?? {}) };
+  // 时效偏好可由调用方按需覆盖（默认 30 天）；不同时效的结果不能共用缓存。
+  if (options.recencyDays !== undefined) config.recencyDays = options.recencyDays;
   const wanted = options.provider ?? config.provider;
-  const cacheKey = `${wanted}|${q}|${config.maxResults}`;
+  const cacheKey = `${wanted}|${q}|${config.maxResults}|${config.recencyDays}`;
   const cached = cache.get(cacheKey);
   if (cached && Date.now() - cached.at < CACHE_TTL_MS) return cached.value;
 
