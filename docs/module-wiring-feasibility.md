@@ -1,6 +1,6 @@
 # 模块接线可行性表（v1）
 
-截至 2026-10-28 12:30。已实现 31 个模块，其中 18 个已接入线上。
+截至 2026-10-28 13:50。已实现 33 个模块，其中 21 个已接入线上（含下午新增的 4 个影子/端点与 1 个真替换）。
 本表记录**剩余 13 个模块为什么没接**，以及下次开工该怎么处理——避免重复评估。
 
 ## 结论先行
@@ -71,3 +71,32 @@
 2. 再做 `scheduler/triggers` 影子（需先完整读出 `scanForWake` 的触发条件）
 3. `lifecycle` 域整体搬迁放到最后——它依赖模块接口稳定，且是装配根的前置
 4. **任何存量替换前，先写特征测试**（用真实日志样本跑新旧两版比对），这是今天 13 个模块接不上的根本教训
+
+---
+
+## 六、2026-10-28 下午进度与今晚待观察
+
+### 已完成
+
+| 项 | 内容 | 关键结论 |
+|---|---|---|
+| `observability/health` 影子 | 三个入参接真实值：`lastIncomingAt` 最大值 / `unreadCountV2` 求和 / `tokenLedger.spentToday()` | 阈值必须对齐：事件陈旧 12h（默认 30min 会在 09:00 把夜间静默天天误报）、积压 200、成本 ¥10 预警 |
+| `auth/allow` 影子 | 真实入站消息流过、0 分歧 | 入站主路径 `handleIncoming → modeAllowed → allowed`，每条消息必经，判定有效 |
+| `scheduler/triggers` 影子 | 只比 nameMention / keyword / anyMessage | 修掉「配置含 probability 就整体跳过」——本群就配了 probability，原实现等于没接 |
+| `session/key` 真替换 | `canonicalV2Key` 委托 `parseKey` | 16 样本对照，仅 >2^53 的超长 id 有差（现实不存在） |
+| `observability/activity` | 新端点 `/api/activity/summary` | 审计日志只写 `HH:MM:SS` 不带日期，必须从尾部倒扫、按时间回绕推算跨天 |
+| `rotation` 归档修复 | 记忆只在**确认进入 prompt 后**才标记 injected | 原实现构造 prompt 时就标记，而 archive 是首个裁剪段 → 一旦被裁就永久丢记忆 |
+
+### 仍建议不接的 12 个
+
+`outbound/escape`、`auth/token`、`auth/verify`、`content/persona-inject`、`scheduler/wake-priority`、
+`session/queue`、`inbound/command`、`inbound/media-plan`、`lifecycle/lock`、`lifecycle/shutdown`、
+`heal/retry`、`obs/log-format`——理由见第三节，未变。
+
+### 今晚待观察（按时间顺序）
+
+1. **21:32 之后**：owner 私聊首次轮换（`createdAt=1793107936516` ≈ 10-27 21:32，`maxAgeHours=24` + 空闲 10min）
+   - 期望日志：`[rotation] 会话 ... 已超过驻留上限`、`[rotation] ... 记忆快照已归档`、`[rotation] 影子不一致`（若模块判定不同）
+   - 重点确认：归档文件生成、下一次唤醒的 archive 段是否真的进了 prompt
+2. **次日 09:00**：定时自检的 `[health] 影子` —— 放宽到 12h 后不应再因夜间静默报分歧
+3. **任意群消息**：`[triggers] 影子已接入` 之后，5 分钟窗口汇总 `可比 N 次（一致 N / 分歧 N）`
