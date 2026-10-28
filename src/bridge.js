@@ -8230,6 +8230,117 @@ async function main() {
           }
           return;
         }
+        if (req.method === 'GET' && url.pathname === '/api/socialV2/memory/export') {
+          // 记忆导出（只读）：把散在各 state 文件里的长期记忆渲染成一份 markdown。
+          // 用途有两个：① 人可以直接读、可以 git；② 这份格式就是「记忆外置」的目标形态，
+          // 先看真实输出再决定要不要把读取路径切到文件上（见 module-wiring-feasibility 第七节）。
+          if (req.headers['x-agent-token']) { sendJson({ ok: false, error: '记忆导出仅控制台可用' }, 403); return; }
+          try {
+            const nowDate = new Date();
+            const dayOf = (ms) => {
+              const n = Number(ms);
+              if (!Number.isFinite(n) || n <= 0) return '—';
+              const d = new Date(n);
+              const p = (x) => String(x).padStart(2, '0');
+              return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+            };
+            const out = [];
+            out.push('# 小鲸鱼 · 记忆');
+            out.push('');
+            out.push(`> 导出时间：${localStamp(nowDate)} · 只读导出，格式即「记忆外置」的目标形态。`);
+            out.push('');
+
+            // 1) 长期事实（profile.json）
+            const profile = readJsonSafe(PROFILE_FILE, []);
+            const facts = (Array.isArray(profile) ? profile : [])
+              .filter((p) => p && p.text && p.status !== 'deleted');
+            out.push('## 关于我 / 长期事实');
+            if (!facts.length) out.push('（暂无）');
+            for (const f of facts) {
+              out.push(`- ${f.text}${f.evidence ? `（证据：${f.evidence}）` : ''}`);
+            }
+            out.push('');
+
+            // 2) 关系（relations.json）
+            const relations = readRelationsFile() || {};
+            out.push('## 关系');
+            const relKeys = Object.keys(relations);
+            if (!relKeys.length) out.push('（暂无）');
+            for (const k of relKeys) {
+              const rel = relations[k] || {};
+              out.push(`### ${k}`);
+              const prof = rel.profile && typeof rel.profile === 'object' ? rel.profile : {};
+              if (prof['称呼']) out.push(`- 称呼：${prof['称呼']}`);
+              if (Array.isArray(prof['雷点']) && prof['雷点'].length) out.push(`- 雷点：${prof['雷点'].join('、')}`);
+              if (Array.isArray(prof['禁忌']) && prof['禁忌'].length) out.push(`- 禁忌：${prof['禁忌'].join('、')}`);
+              const relEvents = Array.isArray(rel.events) ? rel.events : [];
+              if (relEvents.length) {
+                out.push('- 事件：');
+                for (const ev of relEvents.slice(-10)) {
+                  out.push(`  - ${ev.date ? `${ev.date} ` : ''}${String(ev.text ?? '').slice(0, 200)}`);
+                }
+              }
+              out.push('');
+            }
+
+            // 3) 日记（diary.json）
+            const diaryList = normalizeDiary(readJsonSafe(DIARY_FILE, []));
+            const diaryActive = (Array.isArray(diaryList) ? diaryList : [])
+              .filter((d) => d && d.text && d.status !== 'deleted');
+            out.push('## 日记');
+            if (!diaryActive.length) out.push('（暂无）');
+            for (const d of diaryActive.slice(-15).reverse()) {
+              out.push(`### ${dayOf(d.createdAt)}`);
+              out.push(String(d.text));
+              if (d.mood) out.push(`- 感受：${d.mood}`);
+              if (d.unsaid) out.push(`- 没说出口：${d.unsaid}`);
+              out.push('');
+            }
+
+            // 4) 心情（moods.json）
+            const moods = readJsonSafe(MOOD_FILE, {}) || {};
+            out.push('## 心情');
+            const baseMood = moods.baseMood;
+            if (baseMood && baseMood.word) {
+              out.push(`- 底色：${baseMood.word}${baseMood.reason ? `（${baseMood.reason}）` : ''}`);
+            }
+            const handnotes = Array.isArray(moods.handnotes) ? moods.handnotes : [];
+            for (const note of handnotes.slice(-5)) {
+              out.push(`- 手记：${note?.text ?? ''}${note?.tag ? `（${note.tag}）` : ''}`);
+            }
+            if (!baseMood?.word && !handnotes.length) out.push('（暂无）');
+            out.push('');
+
+            // 5) 梗库（memes.json）
+            const memesRaw = readJsonSafe(MEME_FILE, []);
+            const memeList = Array.isArray(memesRaw) ? memesRaw
+              : (Array.isArray(memesRaw?.items) ? memesRaw.items : []);
+            out.push('## 梗库');
+            if (!memeList.length) out.push('（暂无）');
+            for (const m of memeList.slice(-20)) {
+              const text = typeof m === 'string' ? m : (m?.text ?? m?.name ?? '');
+              if (text) out.push(`- ${text}`);
+            }
+            out.push('');
+
+            // 6) 当前会话层记忆（默认 owner 私聊）
+            const rawKey = String(url.searchParams.get('key') ?? '').trim()
+              || (cfg.ownerQQ ? `private:${Number(cfg.ownerQQ)}` : '');
+            const targetKey = canonicalV2Key(rawKey);
+            if (targetKey) {
+              const st = getSocialV2State(targetKey);
+              out.push(`## 当前会话 ${targetKey}`);
+              out.push(formatMemoryV2(st) || '（会话层记忆为空）');
+              out.push('');
+            }
+
+            res.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8', ...SECURITY_HEADERS });
+            res.end(out.join('\n'));
+          } catch (error) {
+            sendJson({ ok: false, error: `记忆导出失败：${error?.message ?? error}` }, 500);
+          }
+          return;
+        }
         if (req.method === 'GET' && url.pathname === '/api/socialV2/memory') {
           const key = String(url.searchParams.get('key') ?? '').trim();
           const category = String(url.searchParams.get('category') ?? '').trim();
