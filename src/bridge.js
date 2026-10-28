@@ -12240,11 +12240,17 @@ async function main() {
     // 成本阈值必须与桥自己的闸门（socialV2.costGate，缺省 ¥10 预警 / ¥15 硬停）对齐。
     // 模块默认是 ¥50 的 85%（=¥42.5），而桥在 ¥15 就已经硬停 —— 不对齐的话这个维度
     // 永远判不到 degraded，等于白接。
-    const shadowCostLimits = (() => {
+    // 事件陈旧阈值放宽到 12 小时：自检固定在 09:00 跑，按模块默认 30 分钟会把「夜里没人
+    // 说话」天天误报成 degraded；12 小时只抓「整个白天一条消息都没进」这种真故障。
+    const shadowLimits = (() => {
       const gate = cfg.socialV2?.costGate ?? {};
       const stop = Number(gate.stop) > 0 ? Number(gate.stop) : 15;
       const warn = Number(gate.warn) > 0 ? Number(gate.warn) : 10;
-      return { costDailyLimit: stop, costWarnRatio: Math.min(1, warn / stop) };
+      return {
+        staleMs: 12 * 3600 * 1000,
+        costDailyLimit: stop,
+        costWarnRatio: Math.min(1, warn / stop)
+      };
     })();
     try {
       const shadowHealth = judgeHealth({
@@ -12254,7 +12260,7 @@ async function main() {
         lastEventAt: shadowInput.lastEventAt,
         unreadBacklog: shadowInput.unreadBacklog,
         costToday: Number(tokenLedger.spentToday?.() ?? 0) || 0,
-        limits: shadowCostLimits,
+        limits: shadowLimits,
         now: now.getTime()
       });
       if ((shadowHealth.level === 'healthy') !== (status === 'OK')) {
