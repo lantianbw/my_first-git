@@ -10964,14 +10964,21 @@ async function main() {
   }
 
   /**
-   * 轮换后的「上一次会话记忆」回注：只注入一次。
-   * 归档文件在轮换前已写好，这里读回 memoryText / 最近几条发言 / 关系线，
-   * 注入后立刻标记 injected，避免旧记忆永久占用上下文（那只是换了个方式膨胀）。
+   * 轮换后的「上一次会话记忆」：只读，不标记。
+   *
+   * 为什么要把「读」和「标记已注入」拆开：本函数在 buildWakePromptV2 构造 segments
+   * 时就被调用，而 archive 段又是**最先被裁剪**的一块。旧实现读到这里就把 injected
+   * 置 true，一旦预算不足把 archive 裁掉，记忆没进 prompt 却再也不会注入 —— 永久丢失。
+   * 所以这里只 peek，由调用方确认文本真的留在最终 prompt 后再标记。
+   *
+   * @returns {{ text: string, resolve: boolean }} resolve=true 表示「现在就可以标记」：
+   *   没有归档、已经注入过、或没有可注入内容（含读取失败——损坏文件不该每次唤醒都重试）。
    */
-  function archiveRecallLineV2(key) {
+  function archiveRecallPeekV2(key) {
     const rec = state.sessionArchive?.[key];
-    if (!rec || rec.injected === true || !rec.file) return '';
+    if (!rec || rec.injected === true || !rec.file) return { text: '', resolve: false };
     let line = '';
+    let readOk = true;
     try {
       const snap = readJsonSafe(rec.file, null);
       if (snap && typeof snap === 'object') {
@@ -10992,12 +10999,18 @@ async function main() {
         if (lines.length) line = `【上一次会话的记忆（自动归档，仅供参考）】\n${lines.join('\n')}\n\n`;
       }
     } catch (error) {
+      readOk = false;
       log(`⚠️ [rotation] 读取归档失败：${error?.message ?? error}`);
     }
-    // 无论读到与否都标记，避免损坏文件导致每次唤醒都重试。
+    return { text: line, resolve: !readOk || !line };
+  }
+
+  /** 标记归档记忆已处理：已确认进入 prompt，或已确认没有内容可注入。 */
+  function markArchiveInjectedV2(key) {
+    const rec = state.sessionArchive?.[key];
+    if (!rec || rec.injected === true) return;
     state.sessionArchive[key] = { ...rec, injected: true, injectedAt: Date.now() };
     saveState();
-    return line;
   }
 
   function shouldRotateSession(key) {
@@ -14265,6 +14278,9 @@ async function main() {
     // ── 注入总预算（4A）：超 maxPromptChars 时按优先级裁剪 ──────────────────
     // 顺序：群聊摘要 → 日记模糊视图 → 梗库 → 表情块。
     // 安全规则、快照、令牌、隐私铁律（角色卡/身份/反AI味/状态/沉睡前观察）永不裁。
+    // 归档记忆只 peek、不在这里标记：archive 段可能被下面的预算裁剪删掉。
+    const archivePeek = archiveRecallPeekV2(key);
+    if (archivePeek.resolve) markArchiveInjectedV2(key);
     const segments = [
       { name: 'role', text: roleLine, removable: false },
       { name: 'identity', text: identityLine, removable: false },
@@ -14278,7 +14294,7 @@ async function main() {
       { name: 'status', text: statusLine, removable: false },
       { name: 'memoryHints', text: memoryHintLine, removable: false },
       { name: 'paceFacts', text: paceFactsLine, removable: false },
-      { name: 'archive', text: archiveRecallLineV2(key), removable: true },
+      { name: 'archive', text: archivePeek.text, removable: true },
       { name: 'relation', text: relationLine, removable: false },
       { name: 'memo', text: memoLine, removable: false },
       { name: 'memoPending', text: memoPendingLine, removable: false },
@@ -14315,6 +14331,10 @@ async function main() {
         if (removed.length) log(`prompt 裁剪：${removedChars} 字（${removed.join('/')}），${total + tailLen}/${budget}`);
       }
       const full = `${segments.map((segment) => segment.text).join('')}${tailText}`;
+      // 只有 archive 段确实留在最终 prompt 里才算注入成功；被裁掉就不标记，
+      // 下次唤醒还能再试（旧实现在构造 segments 时就标记，会永久丢记忆）。
+      const archiveSeg = segments.find((item) => item.name === 'archive');
+      if (archiveSeg && archiveSeg.text) markArchiveInjectedV2(key);
       recordPromptLengthV2([...full].length);
       return full;
     };
