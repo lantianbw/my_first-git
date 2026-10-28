@@ -118,6 +118,7 @@ import { splitText } from './outbound/split.js';
 import { createRateLimiter } from './outbound/rate.js';
 import { isAllowed } from './auth/allow.js';
 import { judgeHealth } from './observability/health.js';
+import { summarize as summarizeActivity } from './observability/activity.js';
 import { judge as costJudge } from './cost/gate.js';
 import { evaluateLengthNudge } from './guards/length.js';
 import { evaluateContent } from './guards/outbound-content.js';
@@ -8119,6 +8120,45 @@ async function main() {
             sendJson(result);
           } catch (error) {
             sendJson({ ok: false, error: `自检失败：${error?.message ?? error}` }, 500);
+          }
+          return;
+        }
+        if (req.method === 'GET' && url.pathname === '/api/activity/summary') {
+          // 审计日志窗口汇总：只读 ACTIVITY_LOG 交给 observability/activity 统一口径
+          // （key 脱敏、按窗口过滤）。纯看板用途，不写任何状态。
+          try {
+            const windowMs = Number(url.searchParams.get('windowMs')) || 24 * 3600 * 1000;
+            let raw = '';
+            try { raw = fs.readFileSync(ACTIVITY_LOG, 'utf8'); } catch { raw = ''; }
+            // 审计日志只写 HH:MM:SS（appendActivity 用的 localClock，不含日期），所以
+            // 从末尾往前扫：时间变大说明越过了一次午夜，日期往前退一天。若文件最后一条
+            // 的时刻已经晚于「现在」，说明它属于更早的一天，从 dayOffset=1 起算。
+            const entries = [];
+            const nowDate = new Date();
+            const midnight = new Date(nowDate);
+            midnight.setHours(0, 0, 0, 0);
+            const baseMs = midnight.getTime();
+            const nowMs = nowDate.getTime();
+            const nowSeconds = nowDate.getHours() * 3600 + nowDate.getMinutes() * 60 + nowDate.getSeconds();
+            let dayOffset = 0;
+            let prevSeconds = Number.POSITIVE_INFINITY;
+            const lines = raw.split(/\r?\n/);
+            for (let i = lines.length - 1; i >= 0; i -= 1) {
+              const m = /^\[(\d{2}):(\d{2}):(\d{2})\]\s*(.*)$/.exec(lines[i]);
+              if (!m) continue;
+              const seconds = Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
+              if (!Number.isFinite(seconds)) continue;
+              if (prevSeconds === Number.POSITIVE_INFINITY && seconds > nowSeconds) dayOffset = 1;
+              else if (seconds > prevSeconds) dayOffset += 1;
+              prevSeconds = seconds;
+              const at = baseMs - dayOffset * 86_400_000 + seconds * 1000;
+              const keyMatch = /(group|private):\d+/.exec(m[4]);
+              entries.push({ at, kind: 'info', key: keyMatch ? keyMatch[0] : '', detail: m[4] });
+            }
+            const summary = summarizeActivity(entries, { windowMs, now: nowMs });
+            sendJson({ ok: true, windowMs, scanned: entries.length, ...summary });
+          } catch (error) {
+            sendJson({ ok: false, error: `活动汇总失败：${error?.message ?? error}` }, 500);
           }
           return;
         }
