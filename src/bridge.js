@@ -106,9 +106,9 @@ import { createRelay } from './relay.js';
 import { loadAntiAiPatterns, checkAntiAi } from './anti-ai-patterns.js';
 import { evaluate as scoreText, formatVerdict } from './scorer.js';
 import { createChain } from './guards/chain.js';
-import { rank as rankMemories } from './content/memory-score.js';
 import { createModuleSwitch } from './tools/module-switch.js';
 import { createRelationStore } from './content/relation-store.js';
+import { renderMemory as renderMemoryV2 } from './content/memory-render.js';
 import { nextInterval } from './scheduler/interval.js';
 import { matchTriggers } from './scheduler/triggers.js';
 import { shouldRotate } from './session/expiry.js';
@@ -11873,37 +11873,13 @@ async function main() {
   }
 
   function formatMemoryV2(st) {
-    if (!st) return '';
-    const lines = [];
-    const topics = Array.isArray(st.activeTopics) ? st.activeTopics.filter((t) => t && t.text) : [];
-    if (topics.length) {
-      lines.push('【进行中的话题】');
-      // 注入窗口有限：按「新近 + 反复提及」的衰减分取前 10，而不是简单取最近 10 条。
-      // 打分只影响排序，不删除任何话题（archiveThreshold 在这里不用）。
-      for (const t of rankMemories(topics, { now: Date.now() }, 10).map((r) => r.item)) {
-        const ago = t.lastMentionAt ? Math.round((Date.now() - t.lastMentionAt) / 60000) : 0;
-        const stale = t.lastMentionAt && Date.now() - Number(t.lastMentionAt) > 2 * 60 * 60 * 1000 ? '（已搁置）' : '';
-        lines.push(`- ${t.text}${stale}（${ago > 0 ? ago + '分钟前' : '刚刚'}）${t.pendingQuestion ? `；待追问：${t.pendingQuestion}` : ''}`);
-      }
+    // 渲染在 content/memory-render（9 条单测）：数据进、文本出，会话状态与调度仍在中枢。
+    try {
+      return renderMemoryV2(st, { now: Date.now() });
+    } catch (error) {
+      log(`⚠️ [memory] 记忆渲染失败（按无记忆处理）：${error?.message ?? error}`);
+      return '';
     }
-    const thoughts = Array.isArray(st.pendingThoughts) ? st.pendingThoughts.filter((t) => t && t.text && (!t.expiresAt || Date.now() < t.expiresAt)) : [];
-    if (thoughts.length) {
-      lines.push('【你想说但还没说的】');
-      for (const t of thoughts.slice(-10)) {
-        lines.push(`- ${t.text}${t.motivation ? `（${t.motivation}）` : ''}`);
-      }
-    }
-    const impressions = st.memberImpressions && typeof st.memberImpressions === 'object' ? st.memberImpressions : {};
-    const names = Object.keys(impressions);
-    if (names.length) {
-      lines.push('【对群友的印象】');
-      for (const name of names.slice(-10)) {
-        const im = impressions[name] || {};
-        const traits = Array.isArray(im.traits) ? im.traits : [];
-        lines.push(`- ${name}：${traits.length ? traits.join('、') : '暂无记录'}（互动 ${Number(im.interactionCount) || 0} 次）`);
-      }
-    }
-    return lines.join('\n');
   }
 
   /**
