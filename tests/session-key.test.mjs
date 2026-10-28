@@ -107,3 +107,20 @@ test('大小写敏感：类型名必须全小写', () => {
   assert.equal(isOwnerKey('Private:10001', 10001), false);
   assert.equal(redactKey('GROUP:123'), '***');
 });
+
+// 这一组是给 bridge 里 canonicalV2Key 的回归保护：它已改为委托 parseKey，
+// 但自身无法单独测试（在 bridge.js 内部）。这里锁住「桥实际会遇到的输入」，
+// 将来谁改 parseKey，桥的 key 行为一旦偏离就会在这里报出来。
+test('桥实际会遇到的 key：真实群号 / QQ 号与常见脏输入', () => {
+  assert.equal(parseKey('group:1057896469').key, 'group:1057896469');
+  assert.equal(parseKey('private:1843979560').key, 'private:1843979560');
+  assert.equal(parseKey('private:2453753245').key, 'private:2453753245');
+
+  // 以下都应返回 ok:false，对应 canonicalV2Key 拿到 null
+  for (const input of ['group:1.5', 'group:-1', 'group:1e3', 'group: 1', 'group:+1', 'group:١٢٣']) {
+    assert.equal(parseKey(input).ok, false, input);
+  }
+
+  // 首尾空白会被 trim，属于合法输入（与旧实现在进入正则前先 trim 的行为一致）
+  assert.equal(parseKey(' private:1 ').key, 'private:1');
+});
