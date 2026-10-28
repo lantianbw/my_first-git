@@ -14,7 +14,7 @@ $target = 'root@175.178.200.118'
 $remote = '/opt/qq-bridge'
 
 Write-Host '[1/5] ensure remote dirs'
-ssh $target "mkdir -p $remote/src/guards $remote/src/content $remote/src/cost $remote/src/tools $remote/src/persist $remote/src/inbound $remote/src/obs $remote/src/scheduler"
+ssh $target "mkdir -p $remote/src/guards $remote/src/content $remote/src/cost $remote/src/tools $remote/src/persist $remote/src/inbound $remote/src/obs $remote/src/scheduler $remote/src/observability $remote/src/auth $remote/src/session $remote/src/outbound $remote/src/heal $remote/src/lifecycle"
 
 Write-Host '[2/5] backup remote bridge.js (keep newest 3)'
 ssh $target "cd $remote && cp -p src/bridge.js src/bridge.js.bak-deploy-`$(date +%Y%m%d-%H%M%S) && ls -1t src/bridge.js.bak-* | tail -n +4 | xargs -r rm -f"
