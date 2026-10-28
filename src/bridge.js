@@ -40,9 +40,9 @@ import { loadModelFallback, saveModelFallback, buildEffectiveChain, isFallbackEr
 import { computeSleepGate } from './sleep-gate.js';
 import { loadLifeProactiveState, saveLifeProactiveState, loadMaterialDigest, shouldMorningPoke, shouldDiscoveryShare, todayStr } from './life-proactive.js';
 import { detectCommitment, detectCorrection, diaryNeedsBackfill, shouldDiarySettle, shouldWeeklyDigest, loadMemoryTriggerState, saveMemoryTriggerState } from './memory-triggers.js';
-import { discoverSnowLumaConnection, persistSnowLumaEndpoint, persistToken } from './snowluma-conn.js';
+import { createTokenHeal } from './heal/token.js';
 import { hardenDir, manualDirCommand } from './state-acl.mjs';
-import { extractForwardIds, forwardIdFromData, sanitizeForwardId, formatForwardResponse, formatCardText } from './forward.js';
+import { extractForwardIds, sanitizeForwardId, formatForwardResponse } from './forward.js';
 import { resolvePriceTable } from './model-prices.js';
 import { buildCrossKeyBlock, buildCrossKeyMultiBlock, normalizeCrossKeyConfig } from './cross-key.js';
 import { extractTextPayload } from './media-tools.js';
@@ -118,9 +118,17 @@ import { buildArchiveSnapshot, buildRecallText } from './session/archive.js';
 import { isDuplicate } from './outbound/dedupe.js';
 import { splitText } from './outbound/split.js';
 import { createRateLimiter } from './outbound/rate.js';
+// 入站归一（两遍：带引用 / 纯文本）与媒体元数据提取搬进 inbound/segments（13 条单测）。
+// 名字改成 normalizeSegments：它不再直接返回字符串，而是 { ok } 结果 —— 契约 D 表要求
+// inbound/segments fail closed，归一失败只丢这一条消息，所以 ok 的判断必须留在调用点。
+import { segmentsToText as normalizeSegments, extractMediaFromSegments, sanitizeMediaSummary } from './inbound/segments.js';
 import { isAllowed } from './auth/allow.js';
 import { judgeHealth } from './observability/health.js';
 import { summarize as summarizeActivity } from './observability/activity.js';
+import { createCappedLogger, formatLine, localClock as localClockImpl } from './obs/log.js';
+import { redactSensitive as redactSensitiveArgs, sanitizeToolArgs as sanitizeToolArgsImpl, prepareToolLogEntry, prepareFeedbackEntry } from './obs/tool-log.js';
+import { wakePriority, isTimerWakeReason } from './scheduler/wake.js';
+import { needsPinyinBackfill } from './persist/migrations.js';
 import { judge as costJudge } from './cost/gate.js';
 import { evaluateLengthNudge } from './guards/length.js';
 import { evaluateContent } from './guards/outbound-content.js';
@@ -281,11 +289,9 @@ const BRIDGE_LOG = path.join(STATE_DIR, 'bridge.log');
  * 就返回 true。只在启动时决定「是否写回一次」，不参与业务逻辑。
  */
 function fileNeedsPinyinBackfill(file) {
+  // 判定逻辑搬进 src/persist/migrations.js（纯函数吃已解析数组），这里只保留文件 IO。
   try {
-    const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
-    // 允许 pinyin 为空串（纯数字/符号词条没有拼音），只要求字段存在。
-    return Array.isArray(raw) && raw.some((e) => !e
-      || typeof e.pinyin !== 'string' || !Array.isArray(e.variants));
+    return needsPinyinBackfill(JSON.parse(fs.readFileSync(file, 'utf8')));
   } catch {
     return false;
   }
@@ -1443,66 +1449,20 @@ function releaseLock() {
 // ── 工具 ────────────────────────────────────────────────────────────────────
 // 日志同时输出到 stdout 与 state/bridge.log（守护窗口不可见时也能排查）
 
-/** 单条日志的最大长度：一条异常巨大的错误对象不能把整个日志文件变成 5MB。 */
-const LOG_LINE_MAX = 1000;
+// 日志行组装、脱敏调用、超长截断与按行数轮转全部搬进 src/obs/log.js（13 条单测）。
+// 这里只剩两样真正的 IO：console.log 与 appendBridgeLog，以及 localClock 的默认参数
+// （中枢多处调用 localClock()，而模块按契约不许读系统时钟，所以默认值只能留在这里）。
 
-/**
- * 带行数上限的追加写日志。
- *
- * 为什么不能「append 之后再读回整个文件数行数」：那样每写一行都要同步读一遍整个文件，
- * 到上限后还要整文件重写一次。实测 bridge.log 到了 2000 行（约 200KB）时，
- * 单次 log() 要 17ms 左右，而每条 QQ 消息会打 2~4 条日志 —— 每条消息白扔几十毫秒的
- * 事件循环。这里改成**内存计数器**：只在启动时数一次，之后 O(1) 追加，
- * 到上限才轮转，轮转用 rename 到 `.1`（不是整文件重写，也不会写坏）。
- */
-function createCappedLogger(file, maxLines) {
-  let lines = -1; // -1 = 还没数过
-  return function append(text) {
-    try {
-      fs.mkdirSync(STATE_DIR, { recursive: true });
-      if (lines < 0) {
-        try {
-          lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).length;
-        } catch {
-          lines = 0;
-        }
-      }
-      fs.appendFileSync(file, text, 'utf8');
-      lines += 1;
-      if (lines > maxLines) {
-        // 轮转：当前文件改名为 .1（覆盖上一个备份），新文件从零开始。
-        try {
-          fs.renameSync(file, `${file}.1`);
-        } catch {
-          // 改名失败（被占用等）就退化成截断，保证文件不会无限增长。
-          fs.writeFileSync(file, '', 'utf8');
-        }
-        lines = 0;
-      }
-    } catch {}
-  };
-}
-
-/** 本地时间 HH:MM:SS。此前用的是 toISOString()，写进日志的是 UTC，和本地时间差 8 小时。 */
+// localClock() 允许省略参数：模块按契约只接收显式时间戳，默认值在这里补上。
 function localClock(atMs = Date.now()) {
-  const d = new Date(atMs);
-  const p = (n) => String(n).padStart(2, '0');
-  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  return localClockImpl(atMs);
 }
+
 
 const appendBridgeLog = createCappedLogger(BRIDGE_LOG, 2000);
 
 function log(...args) {
-  let line;
-  try {
-    const body = args
-      .map((a) => redactSensitiveText(typeof a === 'string' ? a : JSON.stringify(a)))
-      .join(' ')
-      .replace(/[\r\n]+/g, ' ');
-    line = `${localClock()} [bridge] ${body.length > LOG_LINE_MAX ? `${body.slice(0, LOG_LINE_MAX)}…[截断]` : body}`;
-  } catch {
-    line = `${localClock()} [bridge] (日志参数无法序列化)`;
-  }
+  const line = formatLine(args, { redact: redactSensitiveText, at: Date.now() });
   // console.log 必须自成一个 try：stdout 的读者（守护窗口）消失时会抛 EPIPE，
   // 而 log() 是从 socket 事件回调里被调用的 —— 一旦抛出就会变成未捕获异常把进程带走。
   try { console.log(line); } catch {}
@@ -1523,129 +1483,9 @@ function withTimeout(promise, ms, label) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-async function segmentsToText(segments, options = {}) {
-  const { resolveAtName, resolveReply, includeReply = true } = options ?? {};
-  // 有些 OneBot 实现直接把纯文本消息放在 message 字段里（string）
-  if (typeof segments === 'string') return segments.trim();
-  const out = [];
-  for (const seg of segments ?? []) {
-    const d = seg?.data ?? {};
-    switch (seg?.type) {
-      case 'text': out.push(d.text ?? ''); break;
-      case 'at': {
-        if (d.qq === 'all') {
-          out.push('@全体成员');
-        } else {
-          // 优先把 @ 对象解析成群名片/昵称，解析不到再回退成 QQ 号
-          let name = null;
-          try { name = resolveAtName ? await resolveAtName(String(d.qq)) : null; } catch { name = null; }
-          out.push(name ? `@${name}` : `@${d.qq}`);
-        }
-        break;
-      }
-      case 'face': out.push(`[表情${d.id ?? ''}]`); break;
-      // 市场表情（mface）在部分网关实现里出现：有 summary 就用它，别让模型只看到 "[mface]"。
-      case 'mface': out.push(`[表情${d.summary ? `:${d.summary}` : ''}]`); break;
-      case 'image': out.push('[图片]'); break;
-      case 'record': out.push('[语音]'); break;
-      case 'video': out.push('[视频]'); break;
-      case 'file': out.push(`[文件${d.name ?? ''}]`); break;
-      case 'reply': {
-        // 引用/回复段：默认解析成「被引用人 + 原文」，让 AI 能判断这句话是对谁说的；
-        // includeReply=false 时跳过该段，得到“当前消息自己的文字”（用于指令/指向性判断）。
-        if (!includeReply) break;
-        let replyText = '';
-        if (resolveReply) {
-          try {
-            const info = await resolveReply(String(d.id));
-            if (info?.sender || info?.text) {
-              const parts = [];
-              if (info.sender) parts.push(info.sender);
-              if (info.text) parts.push(info.text);
-              replyText = `[引用 ${parts.join('：')}]`;
-            }
-          } catch {}
-        }
-        out.push(replyText || '[引用消息]');
-        break;
-      }
-      case 'json': out.push(formatCardText(d.data ?? d.content ?? d)); break;
-      // markdown：SnowLuma 1.14.9 的线上段落是 `{type:'markdown',data:{content}}`。
-      // 上游 1.14.17+（commit 1934e4e7「include text alongside received markdown」）
-      // 起还会带上 `data.text`。两个形状都读，这样将来升级 SnowLuma 运行时不会退化成
-      // 字面量 `[markdown]` 被喂给模型。SDK 的 KnownMessageSegment 联合里没有 markdown，
-      // 所以段类型是运行时多出来的 —— 这正是 default 分支原来会命中的情况。
-      case 'markdown': out.push(String(d.text ?? d.content ?? '[Markdown]')); break;
-      case 'forward': {
-        const fid = forwardIdFromData(d);
-        out.push(fid ? `[转发消息 id=${fid}]` : '[转发消息]');
-        break;
-      }
-      default: out.push(`[${seg?.type ?? '未知'}]`); break;
-    }
-  }
-  return out.join('').trim();
-}
-
-/**
- * 媒体摘要（QQ 表情的 `summary`）会进入模型上下文、也会被拼进「[表情:…]」这类单行标注。
- * 压掉换行/控制字符并限长：否则一条群消息可以用摘要里的换行伪造出新的提示词段落。
- */
-function sanitizeMediaSummary(value, max = 60) {
-  const s = String(value ?? '').replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, ' ').trim();
-  return s ? truncateText(s, max) : '';
-}
-
-// 从 OneBot 消息段中提取图片/表情元数据（不下载字节，仅记录定位信息）。
-// 供一代自动内联、二代按需工具、控制台/日志使用。
-//
-// 字段必须尽量保留：SnowLuma 收到的 QQ 表情包（收藏/市场表情）是 **image 段 +
-// emoji_id/emoji_package_id/key/url**（实测：sub_type 可能是 0，靠 emoji_id 区分），
-// 部分网关实现则用 mface 段。以前只留 file/url/subType/summary，emoji 字段被丢掉，
-// 一旦 get_image 取不到（市场表情不在网关缓存里），就再也没有其它可用的兜底地址。
-function extractMediaFromSegments(segments) {
-  const media = [];
-  for (const seg of segments ?? []) {
-    if (!seg || typeof seg !== 'object') continue;
-    const d = seg.data ?? {};
-    const emojiFields = {
-      emojiId: String(d.emoji_id ?? d.emojiId ?? ''),
-      emojiPackageId: String(d.emoji_package_id ?? d.emojiPackageId ?? ''),
-      emojiKey: String(d.key ?? '')
-    };
-    if (seg.type === 'image') {
-      media.push({
-        kind: 'image',
-        file: String(d.file ?? ''),
-        url: String(d.url ?? ''),
-        // 线上段落字段是 snake_case 的 `sub_type`（SnowLuma 运行时源码里就这么发）；
-        // 而 SDK 的类型描述的是**内部元素**、拼作 `subType`。两个都读，别只认一个
-        // —— 只读 camelCase 的话这里会永远是空串，而且不会有任何报错。
-        subType: (d.sub_type ?? d.subType) != null ? String(d.sub_type ?? d.subType) : '',
-        summary: sanitizeMediaSummary(d.summary),
-        ...emojiFields
-      });
-    } else if (seg.type === 'mface') {
-      // 市场表情（mface）：没有 image 段可用，emoji_id/url 是唯一来源。
-      media.push({
-        kind: 'sticker',
-        file: String(d.file ?? ''),
-        url: String(d.url ?? ''),
-        subType: '1',
-        summary: sanitizeMediaSummary(d.summary),
-        ...emojiFields
-      });
-    } else if (seg.type === 'face') {
-      media.push({
-        kind: 'face',
-        faceId: String(d.id ?? ''),
-        url: String(d.url ?? ''),
-        summary: sanitizeMediaSummary(d.summary)
-      });
-    }
-  }
-  return media;
-}
+// 入站归一已搬进 src/inbound/segments.js（segmentsToText / extractMediaFromSegments）。
+// 这里不再保留内联副本：旧实现有两处 `catch {}`，且遇到非数组 segments 会抛 TypeError 把整条
+// 事件处理打断；模块改为返回 { ok:false }，由下面的调用点按「只丢这一条消息」处置。
 
 function allowed(kind, id, cfg) {
   // OneBot 事件里的 id 可能是数字也可能是字符串（int64 序列化差异），统一转字符串比较。
@@ -13627,10 +13467,18 @@ async function main() {
         }
       }
       const sender = raw.sender?.card || raw.sender?.nickname || String(raw.sender?.user_id ?? raw.user_id ?? '未知');
-      const text = await segmentsToText(raw.message ?? [], {
+      // 归一失败按 fail closed 处理：这次引用不提供原文（上层渲染成 [引用消息]），
+      // 绝不写半截文本进缓存；负结果按 REPLY_NEGATIVE_TTL_MS 短暂记忆，与其它解析失败路径一致。
+      const normalized = await normalizeSegments(raw.message ?? [], {
         resolveAtName: kind === 'group' ? (qq) => resolveGroupMemberName(convId, qq) : null,
         includeReply: false
       });
+      if (!normalized.ok) {
+        log(`[segments] 引用消息 ${cacheKey} 归一失败，本次不提供原文：${normalized.error}`);
+        replyInfoCache.set(cacheKey, { info: null, ts: Date.now() });
+        return null;
+      }
+      const text = normalized.text;
       const senderUserId = raw.sender?.user_id ?? raw.user_id ?? null;
       const info = {
         sender: String(sender ?? ''),
@@ -13853,10 +13701,8 @@ async function main() {
   }
 
   function appendFeedbackEntry(entry) {
-    const safeEntry = {
-      ...entry,
-      ...(typeof entry?.message === 'string' ? { message: redactSensitiveText(entry.message) } : {})
-    };
+    // 脱敏规则搬进 src/obs/tool-log.js；这里只留"读清单 → 追加 → 原子写"的文件部分。
+    const safeEntry = prepareFeedbackEntry(entry, { redact: redactSensitiveText });
     const list = readFeedbackEntries();
     list.push(safeEntry);
     if (list.length > 500) list.splice(0, list.length - 500);
@@ -13881,27 +13727,7 @@ async function main() {
 
   function appendToolLog(entry) {
     try {
-      const safeEntry = { ...entry };
-      if (typeof safeEntry.error === 'string') safeEntry.error = redactSensitiveText(safeEntry.error);
-      if (typeof safeEntry.args === 'string') {
-        let parsed = safeEntry.args;
-        let parsedOk = false;
-        for (let i = 0; i < 4; i++) {
-          try {
-            const next = JSON.parse(parsed);
-            parsed = next;
-            parsedOk = true;
-            if (typeof next !== 'string') break;
-          } catch {
-            break;
-          }
-        }
-        if (parsedOk) {
-          safeEntry.args = JSON.stringify(redactSensitive(parsed));
-        } else {
-          safeEntry.args = redactSensitiveText(safeEntry.args);
-        }
-      }
+      const safeEntry = prepareToolLogEntry(entry, { redact: redactSensitiveText, truncate: truncateText });
       // 用内存计数上限的追加器：不再「append 完再读回整个文件数行数」——
       // 那个写法在 2000 行（约 650KB）时单次要 15ms，而每次工具调用要写两条。
       appendToolLogFile(`${JSON.stringify(safeEntry)}\n`);
@@ -13910,42 +13736,14 @@ async function main() {
     }
   }
 
-  const SENSITIVE_ARG_KEYS = new Set(['token', 'authorization', 'password', 'passwd', 'secret', 'apikey', 'api_key', 'accesskey', 'access_key', 'accesstoken', 'access_token', 'cookie', 'session', 'privatekey', 'private_key', 'clientsecret', 'client_secret', 'refreshtoken', 'refresh_token', 'x-agent-token', 'x_agent_token']);
+  // 敏感键名单、递归脱敏、JSON 逐层解开与截断全部搬进 src/obs/tool-log.js（14 条单测）；
+  // 这里保留同名薄包装，把"纯文本脱敏"和"截断"这两个中枢能力注入进去。
   function redactSensitive(obj) {
-    if (Array.isArray(obj)) return obj.map(redactSensitive);
-    if (obj && typeof obj === 'object') {
-      // 用无原型对象承接，避免日志脱敏时被 __proto__ 等键触发原型链污染。
-      const out = Object.create(null);
-      for (const [k, v] of Object.entries(obj)) {
-        const key = String(k).toLowerCase();
-        if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue;
-        out[k] = SENSITIVE_ARG_KEYS.has(key) ? '***' : redactSensitive(v);
-      }
-      return out;
-    }
-    if (typeof obj === 'string') return redactSensitiveText(obj);
-    return obj;
+    return redactSensitiveArgs(obj, { redact: redactSensitiveText });
   }
 
   function sanitizeToolArgs(args) {
-    if (args === undefined || args === null) return null;
-    let parsed = args;
-    // DSH 的 tool/call arguments 经常是 JSON 字符串（甚至双层转义），逐层解析后再递归脱敏，避免 token 明文落盘。
-    for (let i = 0; i < 4; i++) {
-      if (typeof parsed !== 'string') break;
-      try {
-        const next = JSON.parse(parsed);
-        parsed = next;
-        if (typeof next !== 'string') break;
-      } catch {
-        break;
-      }
-    }
-    const safe = redactSensitive(parsed);
-    let text;
-    try { text = JSON.stringify(safe); } catch { text = String(safe); }
-    if (text.length > 2000) text = truncateText(text, 2000) + '…(truncated)';
-    return text;
+    return sanitizeToolArgsImpl(args, { redact: redactSensitiveText, truncate: truncateText });
   }
 
   // ── 作息门控（B3）辅助：配置读取 + 拦截日志（10 分钟节流，避免刷屏）──────
@@ -14660,36 +14458,10 @@ async function main() {
     return false;
   }
 
-  const WAKE_PRIORITY = {
-    private: 100,
-    atMention: 90,
-    question: 80,
-    speaker: 75,
-    nameMention: 70,
-    keyword: 60,
-    anyMessage: 50,
-    replyCheck: 40,
-    diarySettle: 38,
-    lifeMorning: 35,
-    timeout: 30,
-    weeklyDigest: 26,
-    lifeDiscovery: 25,
-    proactiveCheck: 20
-  };
+  // 优先级表与查表规则搬到 src/scheduler/wake.js（11 条单测）。保留原函数名，调用点不变。
+  const wakePriorityV2 = wakePriority;
 
-  // 唤醒原因可能带子类型（如 keyword:小鲸鱼、speaker:昵称），取冒号前的基名计算优先级。
-  function wakePriorityV2(reason) {
-    const base = String(reason ?? '').split(':')[0];
-    return WAKE_PRIORITY[base] ?? 0;
-  }
-
-  // 与「未读消息」无关的唤醒原因（定时器/引导）。这些原因在会话繁忙时被暂存后，
-  // 不能用「unread 里还有没有对应 seq」来判断是否还要补发 —— 那一轮很可能已经把
-  // 未读全部标读了，结果就是 timeout 定时器被静默丢掉、会话停在无定时器的静默态。
-  const TIMER_WAKE_REASONS = new Set(['timeout', 'replyCheck', 'proactiveCheck', 'bootstrap', 'admin', 'lifeMorning', 'lifeDiscovery', 'diarySettle', 'weeklyDigest']);
-  function isTimerWakeReason(reason) {
-    return TIMER_WAKE_REASONS.has(String(reason ?? '').split(':')[0]);
-  }
+  // 定时器类唤醒原因集合与判定搬到 src/scheduler/wake.js，这里直接用同名导入。
 
   function scheduleWakeV2(key, reason) {
     if (cfg.socialV2?.enabled === false) return;
@@ -14969,9 +14741,20 @@ async function main() {
     const resolveReply = (messageId) => resolveReplyInfo(kind, id, messageId, event.self_id);
     // textContent 带引用对象信息，供 DSH 判断“这句话在对谁说”；
     // plainContent 只保留当前消息自己的文字，用于命令/指向性判断，避免被引用原文干扰。
-    const textContent = await segmentsToText(event.message ?? [], { resolveAtName, resolveReply });
-    const plainContent = await segmentsToText(event.message ?? [], { resolveAtName, includeReply: false });
-    const mediaList = extractMediaFromSegments(event.message ?? []);
+    // 三份产物（两遍文本 + 媒体元数据）必须同时成功：契约 D 表 inbound/segments 是 fail closed，
+    // 但失败范围只有**这一条消息** —— 归一不出完整文本就不投给模型，绝不猜半截。
+    const textResult = await normalizeSegments(event.message ?? [], { resolveAtName, resolveReply });
+    const plainResult = await normalizeSegments(event.message ?? [], { resolveAtName, includeReply: false });
+    const mediaResult = extractMediaFromSegments(event.message ?? []);
+    const failed = [textResult, plainResult, mediaResult].find((r) => !r.ok);
+    if (failed) {
+      log(`[segments] ${key} 入站归一失败，丢弃本条消息：${failed.error}`);
+      appendActivity(`${key} 入站归一失败，已丢弃本条：${truncateText(failed.error, 120)}`);
+      return;
+    }
+    const textContent = textResult.text;
+    const plainContent = plainResult.text;
+    const mediaList = mediaResult.media;
     const messageRef = String(event.message_id ?? event.msg_id ?? event.message_seq ?? '');
     const seqRef = event.message_seq != null ? String(event.message_seq) : '';
     const refsToStore = [...new Set([messageRef, seqRef].filter(Boolean))];
@@ -16060,6 +15843,21 @@ async function main() {
     reconnect: true
   });
 
+  // token 自愈的三件事（应用自愈结果 / 写回 config.json / 带节流的自愈入口）已搬到
+  // src/heal/token.js —— 为什么必须有（换账号后 token 变了、HTTP 与 WS 是两个不同的 token、
+  // 端点跟随可关、日志不得出现完整令牌）都在那边的文件头，这里只做装配：把中枢手里的
+  // cfg / bot / 日志 / config.json 路径注入进去。节流状态跟着实例走（不再有 tokenHealAt 变量）。
+  const tokenHeal = createTokenHeal({
+    cfg,
+    bot,
+    log: (message) => log(message),   // `[bridge]` 前缀由 log() 统一加
+    now: () => Date.now(),
+    configPath: path.join(ROOT, 'config.json')
+  });
+  const applyHealedTokens = (result) => tokenHeal.applyHealedTokens(result);
+  const syncTokenToFile = () => tokenHeal.syncTokenToFile();
+  const healTokenIfStale = (reason) => tokenHeal.healTokenIfStale(reason);
+
   bot.onPrivateMessage(async (event) => {
     // 统一按字符串比较：网关可能把 id 序列化成 number/string 混用，
     // 用 `===` 漏掉自己发的消息会进入正常处理（reserved2 下 AI 会回答自己 / chat 下可能回复循环）。
@@ -16151,105 +15949,6 @@ async function main() {
     void syncTokenToFile();
   });
 
-  /**
-   * SnowLuma 恢复连接时自愈 accessToken。
-   *
-   * 为什么需要：SnowLuma 的 OneBot 配置按账号分文件（config/onebot_<QQ号>.json），
-   * 每个账号 token 不同。换账号登录后，config.json 里的旧 token 会 401/连不上，
-   * 而 SDK 的重连会一直用**构造时**那个 token 无限重试 —— 表现为"桥接活着但收发全废"。
-   * 这里在每次重连失败时重新发现当前账号的 token 并热更新，随后自愈。
-   */
-  /**
-   * 应用自愈结果：**HTTP token 与 WS token 是两个不同的值**。
-   *   - cfg.snowluma.accessToken → HTTP 调用（发语音、fetch_ptt_text、get_msg 等）与写回 config.json
-   *   - bot.accessToken          → WebSocket 连接（桥接的主链路，端口 3001）
-   * 只修其中一个的话，桥接仍会以 1006 反复重连（实测踩过）。
-   */
-  async function applyHealedTokens(r) {
-    const httpToken = r.token;
-    const wsToken = r.wsToken || r.token;
-    // ⚠️ 端点跟随是可关的（`snowluma.followDiscoveredEndpoint: false`），默认保持原行为。
-    //
-    // 为什么需要这个开关：自愈会拿 `discoverSnowLumaConnection()` **发现到的** wsUrl
-    // 覆盖掉配置里的值，并写回 config.json。这在"换了 QQ 账号所以端口变了"的主场景下
-    // 是对的（端口确实是 per-account 的），但它**不区分**「用户写的是一个过期值」和
-    // 「用户就是要指向别处」。后果：
-    //   · 想跑第二个实例/指向另一份 SnowLuma 安装（多账号、测试、灰度）时，
-    //     它会静默把端点改回去、连到发现到的那一份 —— 表现为"消息发到了另一个账号/群"，
-    //     或者"我明明指向了 B 却一直在收 A 的消息"，很难归因；
-    //   · 实测踩过：把 wsUrl 指向一个死端口想让它"别连"，启动后仍被改回真实端点并连上。
-    // 关掉之后**只自愈 token**（换账号仍然能恢复），但绝不动 URL、也不写回 URL。
-    const followEndpoint = cfg.snowluma?.followDiscoveredEndpoint !== false;
-    const wsUrl = followEndpoint ? (r.wsUrl || cfg.snowluma.wsUrl) : cfg.snowluma.wsUrl;
-    const wsChanged = bot.accessToken !== wsToken || bot.url !== wsUrl;
-    bot.accessToken = wsToken || undefined;
-    // 端口也是 per-account 的（实测：换账号后 WS 从 3001 之类变到别的端口），
-    // 只换 token 不换 URL 会一直 1006 重连。
-    bot.url = wsUrl;
-    if (wsChanged) log(`🔄 SnowLuma WS 连接已更新：${wsUrl}（token ${String(wsToken).slice(0, 4)}…）`);
-    if (cfg.snowluma.accessToken !== httpToken) {
-      log(`🔄 SnowLuma HTTP token 已更新（来源 ${r.source}）：${String(cfg.snowluma.accessToken).slice(0, 4)}… → ${String(httpToken).slice(0, 4)}…`);
-      cfg.snowluma.accessToken = httpToken;
-    }
-    if (!followEndpoint && r.wsUrl && r.wsUrl !== cfg.snowluma.wsUrl) {
-      log(`   （已按 snowluma.followDiscoveredEndpoint=false 忽略发现到的端点 ${r.wsUrl}，继续用配置值 ${cfg.snowluma.wsUrl}）`);
-    }
-    // 把确认可用的端点写回 config.json：下次启动直接就对了，不用再自愈一遍。
-    // ⚠️ 必须在**改 cfg 之前**算出要写什么，但写文件时对照的是**文件里**的旧值 ——
-    //    这里显式传 wsUrl，且不依赖 cfg 的内存值来判断"是否需要写"。
-    // 关掉端点跟随时不写 URL：否则"我设了别处"这件事会被自愈持久化地抹掉。
-    const previousWsUrl = cfg.snowluma.wsUrl;
-    cfg.snowluma.wsUrl = wsUrl;
-    try {
-      const w = persistSnowLumaEndpoint(path.join(ROOT, 'config.json'), {
-        accessToken: httpToken,
-        ...(followEndpoint ? { wsUrl, httpUrl: r.baseUrl } : {})
-      });
-      if (w.updated) log(`   已写回 config.json：${Object.keys(w.changed).join(' / ')}`);
-      else log('   config.json 端点已是最新，无需改写');
-      if (!followEndpoint && previousWsUrl !== wsUrl) cfg.snowluma.wsUrl = previousWsUrl;
-    } catch (error) {
-      log(`   ⚠️ 写回 config.json 失败：${error?.message ?? error}`);
-    }
-    // 更新了就让 SDK 立刻用新参数重连（否则要等下一轮退避，最长要好几秒）
-    if (wsChanged) {
-      try { bot.close(1000, 'token-refresh'); } catch {}
-      try { bot.connect(); } catch {}
-    }
-    return wsChanged;
-  }
-
-  /** 只写文件、不动物件（连接已成功时用）。 */
-  async function syncTokenToFile() {
-    try {
-      const r = persistToken(path.join(ROOT, 'config.json'), cfg.snowluma.accessToken ?? '');
-      // 只记「已写回」，不打印 token 片段：日志会被贴进 issue / 截图，
-      // 前 4 个字符同样是凭据的一部分（CWE-532，见 PR #13）。
-      if (r.updated) log('🔄 已把当前 token 写回 config.json');
-    } catch {}
-  }
-
-  let tokenHealAt = 0;
-  /** 自愈一次 token：成功 true；失败/被 10s 节流 false。重试由下面的 onebotRetry 统一排。 */
-  async function healTokenIfStale(reason) {
-    const now = Date.now();
-    if (now - tokenHealAt < 10000) return false;   // 节流：close 事件会连续触发
-    tokenHealAt = now;
-    try {
-      const r = await discoverSnowLumaConnection({ cfg, timeoutMs: 4000 });
-      if (!r.ok) {
-        log(`⚠️ token 自愈失败（${reason}）：${r.error}`);
-        return false;
-      }
-      await applyHealedTokens(r);
-      log(`   自愈完成：账号 ${r.self?.user_id ?? '?'}（${reason}）`);
-      return true;
-    } catch (error) {
-      log(`⚠️ token 自愈异常：${error?.message ?? error}`);
-      return false;
-    }
-  }
-
   // OneBot 未就绪时的退避重试：5s → 15s → 60s → 300s，之后固定 300s，直到连上为止。
   // 为什么必须自己排：实测整机重启后桥比 QQ 先起，3000/3001 端口还不存在，自愈只打一条
   // 「token 自愈失败」就停手了；端口 5 分钟后恢复也没有人来叫醒它 —— 日志空白 6 小时 44 分，
@@ -16262,7 +15961,7 @@ async function main() {
   /** 一次「自愈 + 重连」尝试；没连上就排下一次（计次只在 onebotRetry 里推进）。 */
   async function retryOnebot() {
     // 到点的重试必须真跑一次：把 10 秒节流清零，否则「到点」会被节流吞掉。
-    tokenHealAt = 0;
+    tokenHeal.resetThrottle();
     try {
       await healTokenIfStale('retry');
     } catch (error) {
