@@ -114,6 +114,7 @@ import { nextInterval } from './scheduler/interval.js';
 import { matchTriggers } from './scheduler/triggers.js';
 import { shouldRotate } from './session/expiry.js';
 import { parseKey } from './session/key.js';
+import { buildArchiveSnapshot, buildRecallText } from './session/archive.js';
 import { isDuplicate } from './outbound/dedupe.js';
 import { splitText } from './outbound/split.js';
 import { createRateLimiter } from './outbound/rate.js';
@@ -11004,31 +11005,17 @@ async function main() {
   function archiveRotatedSession(key, sessionId) {
     try {
       const st = getSocialV2State(key) ?? {};
-      const clip = (value, n) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, n);
-      const topics = (Array.isArray(st.activeTopics) ? st.activeTopics : [])
-        .filter((t) => t && t.text)
-        .slice(-20)
-        .map((t) => ({ text: clip(t.text, 120), lastMentionAt: Number(t.lastMentionAt) || null }));
-      const recent = (Array.isArray(st.recentMessages) ? st.recentMessages : [])
-        .slice(-40)
-        .map((m) => ({
-          self: m?.isSelf === true,
-          who: clip(m?.name ?? m?.uid ?? '', 40),
-          text: clip(m?.tail || m?.plain || m?.text || '', 200),
-          time: Number(m?.time) || null
-        }))
-        .filter((m) => m.text);
-      const snapshot = {
+      // 快照构造在 session/archive（10 条单测）：数据进、对象出，写文件仍在中枢。
+      const snapshot = buildArchiveSnapshot({
         key,
         sessionId: sessionId ?? null,
-        rotatedAt: Date.now(),
-        topics,
-        recent,
+        now: Date.now(),
+        state: st,
         // 这一份就是她退役前实际看到的记忆块与关系线：存文本而不是原始结构，
         // 因为记忆的真实形态是「注入给她的话」，而不是 underlying 字段长什么样。
         memoryText: formatMemoryV2(st),
         relationText: relationBlockV2(key)
-      };
+      });
       const dir = path.join(STATE_DIR, 'session-archive');
       fs.mkdirSync(dir, { recursive: true });
       const safeKey = String(key).replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -11039,7 +11026,7 @@ async function main() {
       state.sessionArchive = state.sessionArchive || {};
       state.sessionArchive[key] = { file, at: snapshot.rotatedAt, injected: false };
       saveState();
-      log(`[rotation] 会话 ${key} 记忆快照已归档：${path.basename(file)}（话题 ${topics.length} 条 / 发言 ${recent.length} 条）`);
+      log(`[rotation] 会话 ${key} 记忆快照已归档：${path.basename(file)}（话题 ${snapshot.topics.length} 条 / 发言 ${snapshot.recent.length} 条）`);
       return file;
     } catch (error) {
       log(`⚠️ [rotation] 记忆归档失败（不影响轮换）：${error?.message ?? error}`);
@@ -11065,23 +11052,8 @@ async function main() {
     let readOk = true;
     try {
       const snap = readJsonSafe(rec.file, null);
-      if (snap && typeof snap === 'object') {
-        const lines = [];
-        const memoryText = String(snap.memoryText ?? '').trim();
-        if (memoryText) lines.push(memoryText);
-        const recent = Array.isArray(snap.recent) ? snap.recent.slice(-6) : [];
-        if (recent.length) {
-          lines.push('最近说过的话：');
-          for (const m of recent) {
-            const who = m?.self ? '你' : (String(m?.who ?? '').trim() || '对方');
-            const text = String(m?.text ?? '').trim();
-            if (text) lines.push(`- ${who}：${text}`);
-          }
-        }
-        const relationText = String(snap.relationText ?? '').trim();
-        if (relationText) lines.push(relationText);
-        if (lines.length) line = `【上一次会话的记忆（自动归档，仅供参考）】\n${lines.join('\n')}\n\n`;
-      }
+      // 回注排版在 session/archive（10 条单测），这里只管读文件与标记。
+      line = buildRecallText(snap);
     } catch (error) {
       readOk = false;
       log(`⚠️ [rotation] 读取归档失败：${error?.message ?? error}`);
