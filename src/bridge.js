@@ -110,7 +110,9 @@ import { rank as rankMemories } from './content/memory-score.js';
 import { createModuleSwitch } from './tools/module-switch.js';
 import { createRelationStore } from './content/relation-store.js';
 import { nextInterval } from './scheduler/interval.js';
+import { matchTriggers } from './scheduler/triggers.js';
 import { shouldRotate } from './session/expiry.js';
+import { parseKey } from './session/key.js';
 import { isDuplicate } from './outbound/dedupe.js';
 import { splitText } from './outbound/split.js';
 import { createRateLimiter } from './outbound/rate.js';
@@ -1684,12 +1686,12 @@ function allowShadowCompare(kind, id, cfg, allowList, result) {
 }
 
 // 二代会话 key 规范化：只接受 group:正整数 / private:正整数，并去掉前导零，避免同一会话出现多个别名。
+// 判定交给 src/session/key.js（9 条单测覆盖）。与原内联实现的唯一行为差异：原版用 Number
+// 转换 + isSafeInteger，超过 2^53 的 id 会被拒；模块按字符串校验 1~20 位，不丢精度。
+// 真实 QQ 号 / 群号都是 10~11 位，两种实现结果相同；差异只存在于不现实的超长数字输入。
 function canonicalV2Key(key) {
-  const m = /^(group|private):(\d+)$/.exec(String(key ?? '').trim());
-  if (!m) return null;
-  const id = Number(m[2]);
-  if (!Number.isSafeInteger(id) || id <= 0) return null;
-  return `${m[1]}:${id}`;
+  const parsed = parseKey(key);
+  return parsed.ok ? parsed.key : null;
 }
 
 const APPROVE_WORDS = new Set(['通过', '同意', '允许', '批准', 'yes', 'y', 'approve', 'ok']);
@@ -12216,20 +12218,42 @@ async function main() {
       reasons.push(`新输入token ${usage.newTokens}/${settings.dailyInputTokenLimit}`);
     }
     const status = reasons.length ? 'WARN' : 'OK';
-    // health 模块影子（粗对比）：现有按端口/在线判定，模块按事件陈旧/积压/成本判定，
-    // 两套标准本来不同，这里只记录分歧，不做任何拦截。unreadBacklog 暂不映射（两处统计口径未统一）。
+    // health 模块影子（粗对比）：现有只看端口/在线；模块还看事件陈旧、未读积压、今日成本。
+    // 两套标准本来不同，这里只记录分歧，不做任何拦截。三个入参全部取真实值：
+    //   lastEventAt  = 各会话 st.lastIncomingAt 的最大值（只算「收到别人的消息」，不含自己回声）
+    //   unreadBacklog= 各会话 unreadCountV2 之和
+    // 注：snowlumaHealth.lastPacketAt 不能当 lastEventAt —— 心跳 30 秒一个，永远不会陈旧。
+    const shadowInput = (() => {
+      try {
+        let lastEventAt = 0;
+        let unreadBacklog = 0;
+        for (const [, st] of socialV2.conversations) {
+          const at = Number(st?.lastIncomingAt) || 0;
+          if (at > lastEventAt) lastEventAt = at;
+          unreadBacklog += unreadCountV2(st);
+        }
+        return { lastEventAt, unreadBacklog };
+      } catch {
+        return { lastEventAt: 0, unreadBacklog: 0 };
+      }
+    })();
     try {
       const shadowHealth = judgeHealth({
         dshOk: Boolean(dshUp),
         onebotOk: Boolean(online),
         snowlumaOk: Boolean(snow3000 && snow3001 && snow5099),
-        lastEventAt: now.getTime(),
-        unreadBacklog: 0,
+        lastEventAt: shadowInput.lastEventAt,
+        unreadBacklog: shadowInput.unreadBacklog,
         costToday: Number(tokenLedger.spentToday?.() ?? 0) || 0,
         now: now.getTime()
       });
       if ((shadowHealth.level === 'healthy') !== (status === 'OK')) {
-        log(`[health] 影子不一致：现实现=${status} 模块=${shadowHealth.level}（${shadowHealth.reasons.join(',')}）`);
+        const silentMin = shadowInput.lastEventAt
+          ? Math.round((now.getTime() - shadowInput.lastEventAt) / 60000) : null;
+        log(`[health] 影子不一致：现实现=${status} 模块=${shadowHealth.level}`
+          + `（${shadowHealth.reasons.join(',')}）`
+          + ` 静默=${silentMin === null ? '无事件' : `${silentMin}min`}`
+          + ` 积压=${shadowInput.unreadBacklog}`);
       }
     } catch (error) {
       log(`⚠️ [health] 影子判定失败：${error?.message ?? error}`);
@@ -13832,6 +13856,101 @@ async function main() {
     return null;
   }
 
+  // ── scheduler/triggers 影子（粗对比） ───────────────────────────────────
+  // 只对比「名字 / 关键词 / anyMessage」三项 —— 这三项现有实现和模块都是纯文本匹配，口径可比。
+  // 刻意不比的几类，原因都是「模块没有该维度」或「已知语义差异」：
+  //   · atMention：现有看 OneBot 结构化 at 段（seg.data.qq === self_id）；模块只看文本，
+  //     群名片与昵称不一致、或 @ 解析失败时会天然分歧。
+  //   · question：现有 isDirectedAtAi 内置「小鲸鱼 / 鲸鱼 / ds」等人格词表；模块按设计
+  //     把词表判给 persona 层（见模块头注释），分歧是设计的，不该当 bug。
+  //   · speakerIds / probability：模块没有这两个触发维度。
+  //   · 私聊：现有直接返回 'private'（私聊恒唤醒），模块没有这个概念。
+  //   · 睡眠期：现有走作息门控，模块不读时钟。
+  // 影子运行统计：用来回答「影子到底跑没跑」，避免只靠「没有分歧日志」反推
+  // （无日志既可能是两边一致，也可能是压根没走到比对）。每 5 分钟最多汇总一条，
+  // 且只在窗口内有过样本时才出声，群安静的时候它不会刷屏。
+  const triggerStats = { windowStart: 0, compared: 0, same: 0, diff: 0, skipped: 0 };
+  let triggerShadowBootLogged = false;
+  let triggerShadowWindowStart = 0;
+  let triggerShadowCount = 0;
+  function triggerShadowFlush(now) {
+    if (!triggerStats.windowStart) { triggerStats.windowStart = now; return; }
+    if (now - triggerStats.windowStart < 300_000) return;
+    const total = triggerStats.compared + triggerStats.skipped;
+    if (total > 0) {
+      log(`[triggers] 影子近 5 分钟：可比 ${triggerStats.compared} 次`
+        + `（一致 ${triggerStats.same} / 分歧 ${triggerStats.diff}），跳过 ${triggerStats.skipped} 次`);
+    }
+    triggerStats.windowStart = now;
+    triggerStats.compared = 0;
+    triggerStats.same = 0;
+    triggerStats.diff = 0;
+    triggerStats.skipped = 0;
+  }
+  function triggerShadowCompare(key, kind, st, reason, plainContent) {
+    try {
+      if (cfg.socialV2?.triggerShadow === false) return;
+      const startedAt = Date.now();
+      triggerShadowFlush(startedAt);
+      // 私聊不计入任何统计：它本来就不参与比对。
+      if (kind !== 'group') return;
+      // 首条群消息样本：证明接线已经生效（否则「无日志」无法区分「没跑」和「一致」）。
+      if (!triggerShadowBootLogged) {
+        triggerShadowBootLogged = true;
+        log(`[triggers] 影子已接入（首条群消息 reason=${reason ?? '未命中'}）`);
+      }
+      // 现有侧命中结构化 at / 提问 / speaker / probability 时模块无对应维度，跳过。
+      if (reason && !/^(anyMessage$|nameMention$|keyword:)/.test(String(reason))) {
+        triggerStats.skipped += 1;
+        return;
+      }
+      const tr = st.wakeConfig?.triggers ?? {};
+      if (Array.isArray(tr.speakerIds) && tr.speakerIds.length) {
+        triggerStats.skipped += 1;
+        return;
+      }
+      if (Number(tr.probability) > 0) {
+        triggerStats.skipped += 1;
+        return;
+      }
+      if (sleepGateCfg().enabled !== false && computeSleepGate(new Date(), sleepGateCfg()).asleep) {
+        triggerStats.skipped += 1;
+        return;
+      }
+      const verdict = matchTriggers({
+        triggers: {
+          atMention: false,
+          question: false,
+          nameMention: tr.nameMention !== false,
+          keywords: Array.isArray(tr.keywords) ? tr.keywords : [],
+          anyMessage: tr.anyMessage === true,
+          caseSensitive: false
+        },
+        message: String(plainContent ?? ''),
+        selfNames: selfNickname ? [selfNickname] : [],
+        selfQQ: ''
+      });
+      const legacyHit = Boolean(reason);
+      triggerStats.compared += 1;
+      if (verdict.hit === legacyHit) {
+        triggerStats.same += 1;
+        return;
+      }
+      triggerStats.diff += 1;
+      const now = Date.now();
+      if (now - triggerShadowWindowStart > 600_000) {
+        triggerShadowWindowStart = now;
+        triggerShadowCount = 0;
+      }
+      if (triggerShadowCount >= 5) return;
+      triggerShadowCount += 1;
+      log(`[triggers] 影子不一致：现实现=${legacyHit ? reason : '未命中'}`
+        + ` 模块=${verdict.hit ? verdict.reason : '未命中'}（${key}）`);
+    } catch (error) {
+      log(`⚠️ [triggers] 影子判定失败：${error?.message ?? error}`);
+    }
+  }
+
   // Only messages actually offered to the model authorize cursor-based acknowledgement.
   // Keep this receipt in memory: after a restart the model must fetch unread again.
   /** 未读数：不计自己发的回声（isSelf）。 */
@@ -14890,6 +15009,7 @@ async function main() {
         scheduleWakeV2(key, 'bootstrap');
       } else {
         const reason = evaluateWakeTriggerV2(key, st, event, kind, textContent, plainContent, quoteTargetIsSelf);
+        triggerShadowCompare(key, kind, st, reason, plainContent);
         if (reason) {
           scheduleWakeV2(key, reason);
         }
