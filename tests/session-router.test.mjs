@@ -1,11 +1,11 @@
-import assert from 'node:assert/strict';
+﻿import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   canonicalConversationKey,
   createInitialConversationState,
   migrateLegacyMode,
   SessionRouter,
-} from './session-router.mjs';
+} from '../src/core/session-router.mjs';
 
 const ownerQQ = 42; // Synthetic test identity.
 const ownerKey = `private:${ownerQQ}`;
