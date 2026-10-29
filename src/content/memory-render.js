@@ -79,6 +79,8 @@ export function renderMemory(st, { now, limits } = {}) {
   }
 
   // 3) 对群友的印象：取最后 N 个名字，没有 traits 时给「暂无记录」而不是留空。
+  //    带 noKinshipTitle 的加一句边界说明——这人要过「爷爷」这类称呼且已被拒，
+  //    不写出来模型下次会重新谈判（2026-10-26~28 就是这么一步步松口的）。
   const impressions = st.memberImpressions && typeof st.memberImpressions === 'object' ? st.memberImpressions : {};
   const names = Object.keys(impressions);
   if (names.length) {
@@ -87,7 +89,8 @@ export function renderMemory(st, { now, limits } = {}) {
       const im = impressions[name] || {};
       const traits = Array.isArray(im.traits) ? im.traits : [];
       const count = Number(im.interactionCount) || 0;
-      lines.push(`- ${name}：${traits.length ? traits.join('、') : '暂无记录'}（互动 ${count} 次）`);
+      const boundary = im.noKinshipTitle === true ? '（边界：不叫亲属称呼，用名字或「你」）' : '';
+      lines.push(`- ${name}：${traits.length ? traits.join('、') : '暂无记录'}（互动 ${count} 次）${boundary}`);
     }
   }
 

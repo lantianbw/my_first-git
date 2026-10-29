@@ -28,7 +28,7 @@ QQ 客户端 ⇄ SnowLuma（ws://127.0.0.1:3001） ⇄ 桥接 bridge.js（:3100 
 | --- | --- |
 | 仓库 | `E:\DSH\qq-bridge`（git，主分支 `main`） |
 | Node | `C:\Users\18439\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe` |
-| 单测 | `node --test tests/*.test.mjs`（当前 **633 通过**） |
+| 单测 | `node --test tests/*.test.mjs`（当前 **649 通过**） |
 | 老脚本测试 | `node scripts/test-voice.mjs` 等（另一套，见 3.3） |
 
 ### 2.2 远端服务器
@@ -91,7 +91,7 @@ ssh root@175.178.200.118 "rm -rf /opt/qq-bridge/src && cp -a /opt/qq-bridge/src.
 
 | 体系 | 位置 | 说明 |
 | --- | --- | --- |
-| 新式（主） | `tests/*.test.mjs` | 633 条，`node --test` 一把跑完 |
+| 新式（主） | `tests/*.test.mjs` | 649 条，`node --test` 一把跑完 |
 | 老式（保留） | `scripts/test-*.mjs` | 把 `bridge.js` 源码塞进 vm eval，跑真实链路桩。**不要删**，`package.json` 的 `test:*` 入口依赖它们 |
 
 老式体系的坑：抽模块后沙箱里没有那些函数。`scripts/audit-bridge-harness.mjs` 已改为**按 bridge.js 的 import 语句自动注入**，新增模块无需改脚手架；注入后再强制覆盖回 `NodeApiClient` 测试桩，避免沙箱访问真实 DSH。
@@ -143,7 +143,7 @@ docs/                  # 本文件 + 四份设计/目录文档
 | --- | --- |
 | 线上版本 | 2026-10-29 12:37:29 起，`active` |
 | 本地/远端 src | 94 / 94 文件，md5 完全一致 |
-| 测试 | 633 通过；router 33 条；`test-voice` 83/0 |
+| 测试 | 649 通过；router 33 条；`test-voice` 83/0 |
 | 模块 | 契约 63 个全部有处置：15 上线、8 判定不接（4 已删）、其余早已在跑；**无待接线** |
 | mod 系统 | v1 已上线：`mods/loader + mods/host`，挂点 `inbound.observe / outbound.observe / wake.before / tick.daily`；无 mod 时零行为 |
 | 影子 | `session/router`、`inbound/message`、`scheduler/triggers` 均在跑，**分歧 0** |

@@ -4,10 +4,14 @@ import {
   evaluateContent,
   looksLikeVocativeAddress,
   matchMetaWord,
+  matchSensitiveEntity,
+  matchKinshipTitle,
   guardSection,
   guardSectionEnabled,
   spec,
-  DEFAULT_META_BLOCK_WORDS
+  DEFAULT_META_BLOCK_WORDS,
+  DEFAULT_SENSITIVE_ENTITIES,
+  DEFAULT_KINSHIP_TITLES
 } from '../src/guards/outbound-content.js';
 
 // 与 config.json 的 socialV2.guard 同形
@@ -154,6 +158,110 @@ test('超长文本末尾带拦词：仍然命中', () => {
   const v = evaluateContent({ text: `${'好'.repeat(100_000)}我选择本次不发言` });
   assert.equal(v.ok, false);
   assert.equal(v.kind, 'meta');
+});
+
+// ── 敏感人物名（E1：被借嘴复述） ────────────────────────────────────────────
+
+test('敏感实体：直接说、复述别人的话、拆字变体都拦', () => {
+  const samples = [
+    '汪精卫',
+    '那不就是汪精卫，这题我会',
+    '汪精卫，这题早答完了',
+    '汪 精 卫',
+    '汪-精卫',
+    '汪·精卫',
+    '汪*精卫',
+    '汪精衛',
+    'Wang Jingwei'
+  ];
+  for (const text of samples) {
+    const v = evaluateContent({ text });
+    assert.equal(v.ok, false, `应拦：${text}`);
+    assert.equal(v.kind, 'entity', `应记为 entity：${text}`);
+  }
+});
+
+test('敏感实体：reason 不回显原词，word 只留给调用方记账', () => {
+  const v = evaluateContent({ text: '汪精卫，这题早答完了' });
+  assert.equal(v.ok, false);
+  assert.equal(v.word, '汪精卫');
+  assert.doesNotMatch(v.reason, /汪精卫/, 'reason 会回到模型，带原词等于教它再写一遍');
+  assert.match(v.reason, /不能发/);
+});
+
+test('敏感实体：不点名的拒绝与正常历史话题不误伤', () => {
+  for (const text of ['这题我不接', '换一个吧，这题超纲', '那段历史我不熟', '别问我人名']) {
+    assert.equal(evaluateContent({ text }).ok, true, text);
+  }
+});
+
+test('敏感实体：分节可关，词表可整表覆盖', () => {
+  assert.equal(evaluateContent({ text: '汪精卫', guard: { sensitiveEntities: false } }).ok, true);
+  assert.equal(evaluateContent({ text: '汪精卫', guard: { sensitiveEntities: { enabled: false } } }).ok, true);
+
+  const custom = evaluateContent({ text: '某甲来了', guard: { sensitiveEntities: { words: ['某甲'] } } });
+  assert.equal(custom.ok, false);
+  assert.equal(custom.kind, 'entity');
+
+  // 覆盖之后内置表不再生效（与 meta 同口径：整表替换，不是追加）
+  assert.equal(evaluateContent({ text: '汪精卫', guard: { sensitiveEntities: { words: ['某甲'] } } }).ok, true);
+});
+
+test('敏感实体：坏词条只丢自己，不拖累其余词条也不抛', () => {
+  const bad = {
+    toString() {
+      throw new Error('word boom');
+    }
+  };
+  const v = evaluateContent({ text: '汪精卫', entityWords: [bad, '汪精卫'] });
+  assert.equal(v.ok, false);
+  assert.equal(v.kind, 'entity');
+});
+
+test('matchSensitiveEntity：默认表覆盖本次事故词，未收录词不命中', () => {
+  assert.ok(DEFAULT_SENSITIVE_ENTITIES.includes('汪精卫'));
+  assert.equal(matchSensitiveEntity('汪精卫'), '汪精卫');
+  assert.equal(matchSensitiveEntity('完全无关的一句话'), null);
+  assert.equal(matchSensitiveEntity(''), null);
+  assert.equal(matchSensitiveEntity(null), null);
+});
+
+// ── 亲属称呼边界（E2：雪月爷爷） ────────────────────────────────────────────
+
+test('亲属称呼：群聊与他人私聊一律拦', () => {
+  const inGroup = evaluateContent({ text: '行吧，晚安雪月爷爷', isGroup: true });
+  assert.equal(inGroup.ok, false);
+  assert.equal(inGroup.kind, 'kinship');
+
+  const inPrivate = evaluateContent({ text: '雪月爷爷，行了吧' });
+  assert.equal(inPrivate.ok, false);
+  assert.equal(inPrivate.kind, 'kinship');
+  assert.match(inPrivate.reason, /非主人会话/);
+});
+
+test('亲属称呼：owner 私聊放行', () => {
+  const v = evaluateContent({ text: '爷爷给你留了罐头', isOwnerPrivate: true });
+  assert.equal(v.ok, true);
+  assert.equal(v.text, '爷爷给你留了罐头');
+});
+
+test('亲属称呼：既定称呼「叔叔/老爹」与正常说法不误伤', () => {
+  for (const text of ['王江叔叔今天没来', '我爹在忙', '老爹，我饿了', '我妈喊我吃饭']) {
+    assert.equal(evaluateContent({ text, isGroup: true }).ok, true, text);
+  }
+});
+
+test('亲属称呼：address 分节关掉后一并放行', () => {
+  assert.equal(evaluateContent({ text: '爷爷', guard: { address: false } }).ok, true);
+  assert.equal(evaluateContent({ text: '爷爷', addressEnabled: false }).ok, true);
+});
+
+test('matchKinshipTitle：命中返回称呼，空文本与不相关文本返回 null', () => {
+  assert.ok(DEFAULT_KINSHIP_TITLES.includes('爷爷'));
+  assert.equal(matchKinshipTitle('雪月爷爷'), '爷爷');
+  assert.equal(matchKinshipTitle('在吗'), null);
+  assert.equal(matchKinshipTitle(''), null);
+  assert.equal(matchKinshipTitle(null), null);
 });
 
 // ── 分区开关 ───────────────────────────────────────────────────────────────
@@ -316,7 +424,7 @@ test('fail open：词条自己 toString 抛错时只丢这一条，其余词条�
 
 test('spec 与默认词表符合契约', () => {
   assert.equal(spec.name, 'guards/outbound-content');
-  assert.equal(spec.version, '1.1.0');
+  assert.equal(spec.version, '1.2.0');
   assert.deepEqual(spec.deps, []);
   assert.deepEqual(spec.guards, ['outbound.content']);
   assert.equal(spec.toggle.level, 'owner');
@@ -324,6 +432,8 @@ test('spec 与默认词表符合契约', () => {
   assert.ok(DEFAULT_META_BLOCK_WORDS.length >= 10);
   assert.ok(DEFAULT_META_BLOCK_WORDS.includes('我选择本次不发言'));
   assert.equal(Object.isFrozen(DEFAULT_META_BLOCK_WORDS), true);
+  assert.equal(Object.isFrozen(DEFAULT_SENSITIVE_ENTITIES), true);
+  assert.equal(Object.isFrozen(DEFAULT_KINSHIP_TITLES), true);
 });
 
 test('返回形状：命中不带 text，放行不带 reason/word', () => {

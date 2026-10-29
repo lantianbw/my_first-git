@@ -10620,25 +10620,37 @@ async function main() {
         return { ok: false, text: raw, reason: 'outbound guard: 你刚说过几乎一样的话，换个说法，或者这次先不说' };
       }
     }
-    // 元信息 + 称呼越界：判定在 src/guards/outbound-content.js（12 条单测覆盖），
+    // 敏感人物 + 元信息 + 称呼越界：判定在 src/guards/outbound-content.js（单测覆盖），
     // 这里只按返回的 kind 记账；「老爹→你」的改写也由模块给出。
     {
       const metaSection = guardSectionV2('meta');
       const words = Array.isArray(metaSection.words) && metaSection.words.length
         ? metaSection.words.map(String).filter(Boolean)
         : DEFAULT_META_BLOCK_WORDS_V2;
+      // 敏感人物词表只在这里透传「有没有自定义」：没有就把内置默认表留在模块里，
+      // 免得中枢再抄一份词表（抄两份就一定会走样）。
+      const entitySection = guardSectionV2('sensitiveEntities');
+      const entityWords = Array.isArray(entitySection.words) && entitySection.words.length
+        ? entitySection.words.map(String).filter(Boolean)
+        : undefined;
       const content = evaluateContent({
         text: raw,
         metaEnabled: guardSectionEnabledV2('meta'),
         words,
+        entityEnabled: guardSectionEnabledV2('sensitiveEntities'),
+        entityWords,
         addressEnabled: guardSectionEnabledV2('address'),
         isOwnerPrivate: key === `private:${String(cfg.ownerQQ ?? '')}`,
         isGroup: key.startsWith('group:')
       });
       if (!content.ok) {
         if (content.kind === 'meta') appendActivity(`[guard] meta-blocked (${key}): ${content.word}`);
+        else if (content.kind === 'entity') appendActivity(`[guard] entity-blocked (${key}): ${content.word}`);
         else if (content.kind === 'address') appendActivity(`[guard] 饲养员拦截 (${key})`);
-        else appendActivity(`[guard] 老爹拦截·呼语 (${key})`);
+        else if (content.kind === 'kinship') {
+          appendActivity(`[guard] kinship-blocked (${key}): ${content.word}`);
+          markKinshipRefusalV2(key);
+        } else appendActivity(`[guard] 老爹拦截·呼语 (${key})`);
         return { ok: false, text: raw, reason: content.reason };
       }
       if (content.replaced) {
@@ -10647,6 +10659,32 @@ async function main() {
       }
     }
     return { ok: true, text: raw, reason: '' };
+  }
+
+  // 亲属称呼被拦一次，就在对方档案上记一笔边界：下次唤醒时记忆块会写「已拒绝亲属称呼」，
+  // 让模型不用重新谈判（只记 1:1 私聊——群里分不清是谁在要称呼，宁可不记）。
+  // 记不上不影响发送：这里任何异常都只是少一条提示。
+  function markKinshipRefusalV2(key) {
+    try {
+      if (!String(key).startsWith('private:')) return;
+      const st = getSocialV2State(key);
+      const msgs = Array.isArray(st.recentMessages) ? st.recentMessages : [];
+      let name = '';
+      for (let i = msgs.length - 1; i >= 0; i -= 1) {
+        const m = msgs[i];
+        if (m && !m.isSelf && (m.sender || m.userId)) { name = String(m.sender || m.userId); break; }
+      }
+      if (!name || ['__proto__', 'constructor', 'prototype'].includes(name)) return;
+      if (!st.memberImpressions || typeof st.memberImpressions !== 'object') st.memberImpressions = {};
+      const old = st.memberImpressions[name] || {};
+      const traits = Array.isArray(old.traits) ? old.traits.slice(0, 10) : [];
+      const trait = '要过亲属称呼，已拒绝';
+      if (!traits.includes(trait)) traits.push(trait);
+      st.memberImpressions[name] = { ...old, traits, noKinshipTitle: true };
+      saveSocialV2State();
+    } catch (error) {
+      log(`⚠️ [guard] 记录称呼边界失败：${error?.message ?? error}`);
+    }
   }
 
   // 长度软干预：只"拒绝 + 让模型重来"，不截断、不改写内容。

@@ -68,6 +68,18 @@ test('群友印象：无 traits 给「暂无记录」，有 traits 用顿号连�
   assert.match(out, /雪月：暂无记录（互动 0 次）/);
 });
 
+test('群友印象：noKinshipTitle 追加边界提示，没这个字段的不加', () => {
+  const st = {
+    memberImpressions: {
+      雪月: { traits: ['要过亲属称呼，已拒绝'], interactionCount: 3, noKinshipTitle: true },
+      王江: { traits: ['话少'], interactionCount: 2 }
+    }
+  };
+  const out = renderMemory(st, { now: NOW });
+  assert.match(out, /雪月：要过亲属称呼，已拒绝（互动 3 次）（边界：不叫亲属称呼，用名字或「你」）/);
+  assert.match(out, /王江：话少（互动 2 次）$/m, '没有边界的人不追加任何东西');
+});
+
 test('limits 可截断三类条目', () => {
   const st = {
     activeTopics: [

@@ -118,6 +118,11 @@
     "enabled": true,
     "autoReplyCheckMs": 30000,
     "agentPreset": "qq-chat-v2",
+    "guard": {
+      "meta": { "enabled": true },
+      "address": { "enabled": true },
+      "sensitiveEntities": { "enabled": true }
+    },
     "provideRecommendations": true,
     "tools": {
       "getPrompt": true,

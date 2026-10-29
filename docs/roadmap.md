@@ -14,7 +14,7 @@
 | --- | --- |
 | 契约里 30 个"需合并"模块 | 15 个接线并上线、8 个判定不接（其中 4 个文件已删）、7 个未动（安全/提示词相关） |
 | 契约 63 个域模块 | 全部有处置结论，无"待接线"项 |
-| 单测 | 633 条（新式）+ `scripts/test-*.mjs` 老脚本全绿 |
+| 单测 | 649 条（新式）+ `scripts/test-*.mjs` 老脚本全绿 |
 | 桥接体积 | 删掉约 2.3k 行内联实现，`bridge.js` 只剩 IO 与能力注入 |
 
 **落地顺序**：`persist/atomic` + `obs/log`（地基）→ 纯函数批（length / outbound-content / health / tool-log / batch / recheck / migrations / heal-token / segments）→ 调度批（wake / chain）→ 会话批（判定不接）→ `outbound/send`（单行化 + 超长拆分）→ 影子批（`session/router`、`inbound/message`）。

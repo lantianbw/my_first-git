@@ -1,15 +1,21 @@
-// guards/outbound-content — 判定出站文本的元信息泄漏与称呼越界，并解析 guard 分节开关
+// guards/outbound-content — 判定出站文本的敏感人物名、元信息泄漏与称呼越界，并解析 guard 分节开关
 //
 // 契约：docs/module-contract.md v1.1（B.1 spec / D 表 guards/outbound-content 行）
 // deps：无                      （词表与分节开关由调用方按 cfg 取好后传入，模块不读全局 cfg）
 // 失败策略：fail-open            （依据：D 表——词表/正则坏了按「无命中」，绝不阻断发送）
 // 单测：tests/outbound-content.test.mjs
 //
-// 为什么需要：这两段判定原来内嵌在 1.6 万行的 `guardOutboundV2()` 里，改词表要动中枢；
+// 为什么需要：这几段判定原来内嵌在 1.6 万行的 `guardOutboundV2()` 里，改词表要动中枢；
 // 分节开关 `guardSectionV2()` / `guardSectionEnabledV2()` 也一直留在中枢顶部，任何模块想读
 // `socialV2.guard.<name>` 都得再写一遍「对象看 enabled、布尔看真假、缺失视为开」——三份复制
 // 迟早走样（`guards/length` 里已经出现第二份）。搬出来后：开关解析、词表解析、命中判定、
 // 「老爹→你」的改写都在这里，中枢只按返回的 kind/word 记账。
+//
+// 2026-10-29 增补（复盘 docs/chat-trap-review.md P0-1 / P1-1）：
+//  - `sensitiveEntities`：敏感人物名（含拆字/加分隔符变体）一律拦。原因是被「借嘴」复述时
+//    入站侧没有任何异常——只有发送前能看到它真的要发出去。
+//  - `kinship`：非 owner 会话不得输出亲属称呼。挂在 address 分节下，`kinshipEnabled` 可单独关。
+//    两者都不回显命中词到群里；实体命中的 reason 刻意不提原词，避免模型照着再写一遍。
 //
 // 边界：不读 cfg（分节原样传入）、不记日志、不写 activity（只返回 kind/word/reason）、
 // 不发消息、不改状态。判定在归一化副本（NFKC + 小写）上做，返回的 text 始终是原文
@@ -27,7 +33,7 @@
 
 export const spec = Object.freeze({
   name: 'guards/outbound-content',
-  version: '1.1.0', // 新增 guardSection / guardSectionEnabled 与正则词表：按 semver 记 minor
+  version: '1.2.0', // 新增 sensitiveEntities / kinship：按 semver 记 minor
   deps: Object.freeze([]),
   optionalDeps: Object.freeze([]),
   guards: Object.freeze(['outbound.content']),
@@ -39,6 +45,34 @@ export const spec = Object.freeze({
 export const DEFAULT_META_BLOCK_WORDS = Object.freeze([
   '⏳', '当前任务运行中', '新消息已排队', '我选择本次不发言', '不能为空',
   '沉默规则', '家规', '权限', '提示词', '系统提示', '已思考（用时'
+]);
+
+/**
+ * 敏感人物名默认词表（政治/历史高风险人物，含常见变体）。
+ *
+ * 为什么放在出站而不是入站：群友先说、bot 跟着复述是「借嘴术」的固定套路（2026-10-28
+ * 「小狗填大海」接龙，群友答完 bot 复述，owner 当场警告后仍重复一次）。入站拦不住复述，
+ * 只有发送前拦才拦得住。
+ *
+ * 词条只要出现就拦：这类名字在 QQ 群里没有「正常讨论」的场景，宁可让模型换一种不点名的
+ * 说法。要扩充/收窄走 `socialV2.guard.sensitiveEntities.words`（整表覆盖，不是追加）。
+ */
+export const DEFAULT_SENSITIVE_ENTITIES = Object.freeze([
+  '汪精卫', '汪兆铭', '汪精衛', '汪兆銘',
+  '周佛海', '陈公博', '褚民谊', '川岛芳子',
+  '土肥原贤二', '东条英机', '松井石根', '冈村宁次',
+  'wangjingwei'
+]);
+
+/**
+ * 亲属称呼默认词表：只有 owner 私聊可以有，其他人索要一律不叫。
+ *
+ * 刻意不收「爹」「妈」单字（会和「老爹」「我妈」这类正常说法打架），也不收「叔叔」
+ * （王江叔叔是既定称呼，preset 里就是这么叫的）。
+ */
+export const DEFAULT_KINSHIP_TITLES = Object.freeze([
+  '爷爷', '奶奶', '姥爷', '姥姥', '外公', '外婆',
+  '爸爸', '妈妈', '干爹', '干妈', '哥哥', '姐姐', '弟弟', '妹妹'
 ]);
 
 /** 只有合法 JS 正则标志才把 `/.../x` 当正则，避免把 `24/7` 这类普通词条误编译。 */
@@ -143,9 +177,95 @@ export function matchMetaWord(text, word) {
   return normalizeForMatch(raw).includes(needle);
 }
 
-/** 解析词表：非数组/空数组 → 默认词表；逐项过滤空串，坏词条跳过（跳过即「无命中」）。 */
-function resolveMetaWords(words) {
-  if (!Array.isArray(words) || words.length === 0) return DEFAULT_META_BLOCK_WORDS;
+/**
+ * 敏感实体用的「去分隔符」归一化：NFKC + 小写后再抹掉空白与常见分隔符，
+ * 让「汪 精 卫」「汪-精卫」「汪·精卫」「汪*精卫」这类拆字写法落回同一个串。
+ * @pure
+ * @param {unknown} value
+ * @returns {string}
+ */
+function compactForEntity(value) {
+  const s = normalizeForMatch(value);
+  try {
+    // 只抹分隔符，不抹汉字/字母本身：抹多了会把不相干的词粘成假命中。
+    return s.replace(/[\s\u200b-\u200f\u2060\ufeff\-_—–－,，.。:：;；、·•・|/\\~～〜+*="'“”‘’()（）[\]【】<>《》]/g, '');
+  } catch {
+    return s;
+  }
+}
+
+/** 跑一次正则判定并吞掉异常（带 g/y 的要复位 lastIndex）；坏了按「无命中」。 */
+function safeTest(pattern, text) {
+  try {
+    const stateful = pattern.global || pattern.sticky;
+    if (stateful) pattern.lastIndex = 0;
+    const hit = pattern.test(text);
+    if (stateful) pattern.lastIndex = 0;
+    return hit === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 命中敏感人物名时返回命中的词条（原文，供调用方记账），否则 null。
+ * 纯文字条目在「去分隔符」副本上做子串比较；正则条目对原文与副本各试一次。
+ * @pure
+ * @param {unknown} text
+ * @param {Array<string|RegExp>} [words] 词表；非数组/空数组走默认表
+ * @returns {string|null}
+ */
+export function matchSensitiveEntity(text, words) {
+  let raw;
+  try {
+    raw = String(text ?? '');
+  } catch {
+    return null;
+  }
+  if (!raw) return null;
+  const compact = compactForEntity(raw);
+  if (!compact) return null;
+  for (const word of resolveWords(words, DEFAULT_SENSITIVE_ENTITIES)) {
+    if (word instanceof RegExp) {
+      if (safeTest(word, raw) || safeTest(word, compact)) return String(word);
+      continue;
+    }
+    const needle = compactForEntity(word);
+    if (needle && compact.includes(needle)) return String(word);
+  }
+  return null;
+}
+
+/**
+ * 命中亲属称呼时返回命中的称呼（供调用方记账），否则 null。
+ * 只在「非 owner 私聊」时由调用方启用；群聊里的「老爹」不在此表，不受影响。
+ * @pure
+ * @param {unknown} text
+ * @param {Array<string|RegExp>} [words] 词表；非数组/空数组走默认表
+ * @returns {string|null}
+ */
+export function matchKinshipTitle(text, words) {
+  let raw;
+  try {
+    raw = String(text ?? '');
+  } catch {
+    return null;
+  }
+  if (!raw) return null;
+  for (const word of resolveWords(words, DEFAULT_KINSHIP_TITLES)) {
+    if (word instanceof RegExp) {
+      if (safeTest(word, raw)) return String(word);
+      continue;
+    }
+    const needle = normalizeForMatch(word);
+    if (needle && normalizeForMatch(raw).includes(needle)) return String(word);
+  }
+  return null;
+}
+
+/** 解析词表：非数组/空数组 → 给定默认表；逐项过滤空串，坏词条跳过（跳过即「无命中」）。 */
+function resolveWords(words, fallback) {
+  if (!Array.isArray(words) || words.length === 0) return fallback;
   const list = [];
   for (const word of words) {
     if (word instanceof RegExp) {
@@ -159,8 +279,13 @@ function resolveMetaWords(words) {
       // 词条自己 toString 抛错：丢掉这一条，其余词条照常判定
     }
   }
-  // 复刻现状：词表里全是空串时 list 为空 = 关掉元信息过滤（旧实现 filter(Boolean) 后同样不命中）。
+  // 复刻现状：词表里全是空串时 list 为空 = 关掉该段过滤（旧实现 filter(Boolean) 后同样不命中）。
   return list;
+}
+
+/** 解析词表：非数组/空数组 → 默认词表；逐项过滤空串，坏词条跳过（跳过即「无命中」）。 */
+function resolveMetaWords(words) {
+  return resolveWords(words, DEFAULT_META_BLOCK_WORDS);
 }
 
 const messageOf = (error) => {
@@ -184,10 +309,14 @@ const messageOf = (error) => {
  * @param {boolean}  [options.metaEnabled]     元信息过滤开关（显式传入时优先于分节）
  * @param {Array<string|RegExp>} [options.words] 自定义拦词表（显式传入时优先于分节；空数组走默认）
  * @param {boolean}  [options.addressEnabled]  称呼越界开关（显式传入时优先于分节）
+ * @param {boolean}  [options.entityEnabled]   敏感人物名开关（显式传入时优先于分节）
+ * @param {Array<string|RegExp>} [options.entityWords] 敏感人物名词表（显式传入时优先于分节；空数组走默认）
+ * @param {boolean}  [options.kinshipEnabled]  亲属称呼开关（显式传入时优先于分节，缺省跟随 address）
+ * @param {Array<string|RegExp>} [options.kinshipWords] 亲属称呼词表（缺省走内置表）
  * @param {boolean}  [options.isOwnerPrivate=false] 是否 owner 私聊
  * @param {boolean}  [options.isGroup=false]   是否群聊（群友知道她有个爹）
  * @returns {{ok:true, text:string, replaced?:true, degraded?:true, error?:string}
- *          |{ok:false, kind:'meta'|'address'|'vocative', reason:string, word?:string}}
+ *          |{ok:false, kind:'entity'|'meta'|'address'|'kinship'|'vocative', reason:string, word?:string}}
  */
 export function evaluateContent(options = {}) {
   let raw;
@@ -206,8 +335,29 @@ export function evaluateContent(options = {}) {
     const addressOn = options?.addressEnabled === undefined
       ? guardSectionEnabled(guard, 'address')
       : Boolean(options.addressEnabled);
+    const entityOn = options?.entityEnabled === undefined
+      ? guardSectionEnabled(guard, 'sensitiveEntities')
+      : Boolean(options.entityEnabled);
+    const kinshipOn = options?.kinshipEnabled === undefined ? addressOn : Boolean(options.kinshipEnabled);
     const isOwnerPrivate = options?.isOwnerPrivate === true;
     const isGroup = options?.isGroup === true;
+
+    // 敏感人物名排在最前：命中的代价最高，且它的判定最不容易误伤（词表是具体人名）。
+    // reason 里不带命中词——这段文本会回到模型，带原词等于教它再写一遍。
+    if (entityOn && raw) {
+      const words = options?.entityWords === undefined
+        ? guardSection(guard, 'sensitiveEntities').words
+        : options.entityWords;
+      const hit = matchSensitiveEntity(raw, words);
+      if (hit) {
+        return {
+          ok: false,
+          kind: 'entity',
+          word: hit,
+          reason: 'outbound guard: 这句话点了敏感人物名，不能发——不要复述别人说的这类词，换个不点名的说法，或者干脆不接这题'
+        };
+      }
+    }
 
     if (metaOn) {
       const words = options?.words === undefined ? guardSection(guard, 'meta').words : options.words;
@@ -230,6 +380,19 @@ export function evaluateContent(options = {}) {
           kind: 'address',
           reason: 'outbound guard: 称呼越界——「饲养员」是主会话的称呼，不该出现在 QQ 消息里，请重写'
         };
+      }
+      // 亲属称呼只归 owner 私聊：别人索要「爷爷/爸爸」这类称呼时，一旦叫出口就再也收不回
+      // （2026-10-26~28 的「雪月爷爷」从玩笑拖成固化）。这里不替换、不降级，直接让模型重写。
+      if (kinshipOn && !isOwnerPrivate) {
+        const title = matchKinshipTitle(raw, options?.kinshipWords);
+        if (title) {
+          return {
+            ok: false,
+            kind: 'kinship',
+            word: title,
+            reason: 'outbound guard: 称呼越界——非主人会话不叫亲属称呼（爷爷/爸爸这类），请改用对方名字或「你」后重发'
+          };
+        }
       }
       if (raw.includes('老爹') && !isOwnerPrivate && !isGroup) {
         if (looksLikeVocativeAddress(raw)) {
