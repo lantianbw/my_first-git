@@ -24,18 +24,22 @@
 | **M5** | 运维与审计 | §6-4 24h 观察、§6-7 审计指标 | `scripts/ops-daily-check.sh`、`docs/trap-hardening-handover.md`（只追加观察记录） | `src/*`、preset | 无 | 全程并行 |
 | **M6** | 存量清理 | §6-10 preset 契约红 | `scripts/test-qq-preset-contract.mjs`；若最终决定改 preset，则并入 M2 之后 | `src/bridge.js` | M2（若改 preset） | 第 2 批 |
 | **M7** | 音色复刻换声 | 新需求：TTS 声音太人机 | `config.json`（本地 .gitignore，不进 git）、可新增 `scripts/clone-voice.mjs`（复刻辅助脚本） | `src/*`、preset、`plugins/*` | 无（独立泳道） | 独立 |
+| **M8** | 好感度系统 | 功能愿望清单 §1 | `src/memory/*.js`（扩字段）、`src/content/memory-render.js`、`src/bridge.js` **仅记忆段**、`tests/*` | preset、`src/guards/*`、`src/inbound/*` | 无（bridge 泳道，与其它 bridge 模块串行） | 第 4 批 |
+| **M9** | 思维链防抖 | 功能愿望清单 §2 | `dsh/agent-presets/qq-chat-v2/agent.cordis.yml`、`plugins/qq-agent-presets/presets/qq-chat-v2.patch.yml`（生成物）、`tests/*` | `src/*` | 无（preset 泳道） | 第 4 批 |
+| **M10** | QQ 资料管理探测 | 功能愿望清单 §3 | 只读探测 SnowLuma 是否支持改资料（可新增 `scripts/probe-*.mjs`）；**先不改任何功能代码** | `src/*`、preset | 无（只读） | 第 4 批 |
 
-**为什么这么切**：`src/bridge.js` 是唯一热点，M1/M3/M4 都会碰它，所以必须串行；preset 是第二热点，M2/M6 串行；其余文件天然隔离。M7 只动 `config.json`（换 `socialV2.voice.tts.voiceId`）+ 一个复刻辅助脚本，不碰代码泳道与 preset 泳道，天然隔离。
+**为什么这么切**：`src/bridge.js` 是唯一热点，M1/M3/M4 都会碰它，所以必须串行；preset 是第二热点，M2/M6 串行；其余文件天然隔离。M7 只动 `config.json`（换 `socialV2.voice.tts.voiceId`）+ 一个复刻辅助脚本，不碰代码泳道与 preset 泳道，天然隔离。M8（bridge）/ M9（preset）/ M10（只读探测）分属三个不同泳道，可并行。
 
 ---
 
 ## 2. 三条泳道（决定你能同时开几个对话）
 
 ```
-Lane A（代码 / bridge 串行）:  M1 ──→ M3 ──→ M4
-Lane B（提示词 / preset）:      M2 ──→ M6（若改 preset）
+Lane A（代码 / bridge 串行）:  M1 ──→ M3 ──→ M4 ──→ M8（好感度）
+Lane B（提示词 / preset）:      M2 ──→ M6（若改 preset）──→ M9（思维链防抖）
 Lane C（运维 / 只读）:          M5 ──────────────────→（24h 后出观察结论）
 Lane D（配置 / 运营）:          M7（音色换声，只改 config.json + 复刻脚本，独立）
+Lane E（只读探测）:             M10（QQ 资料管理探测，先不改功能码）
 ```
 
 - **第 1 批（可同时开 3 个对话）**：M1 + M2 + M5
@@ -114,6 +118,9 @@ git worktree add ../qq-bridge-m2 -b mod/m2-preset-boundaries
 | 模块 | 工作区 | 分支 | 状态 |
 | --- | --- | --- | --- |
 | M7 | `E:\DSH\qq-bridge-m7` | `mod/m7-voice-clone` | 待开工 |
+| M8 | `E:\DSH\qq-bridge-m8` | `mod/m8-affection` | 待开工 |
+| M9 | `E:\DSH\qq-bridge-m9` | `mod/m9-think-debounce` | 待开工 |
+| M10 | `E:\DSH\qq-bridge-m10` | `mod/m10-profile-probe` | 待开工 |
 
 所有工作区的 `node_modules` 已用目录联接指向主干仓库，可直接跑测试/构建。
 
@@ -269,12 +276,86 @@ git worktree add ../qq-bridge-m2 -b mod/m2-preset-boundaries
 
 **注意**：M7 改的是 `config.json`（.gitignore 本机文件）——这个文件**不进 git**，所以「交付」不是靠 commit config，而是靠「新 voice_id + 试听截图/结果」证明换成功。若写了 `scripts/clone-voice.mjs`，那才需要 commit 到分支供主理人合并。
 
+### M8 好感度系统
+
+**目标**：给 `memberImpressions` 增加「好感度 / 关系温度」字段（正向关系），与 M3 的「风险档案」（负面边界）互补；在唤醒记忆块渲染好感度，让机器人对不同人态度分化。只改 `src/memory/*`、`src/content/memory-render.js`、`src/bridge.js` 的记忆段、`tests/*`。
+
+**背景事实（已核实）**：
+- 现有 `src/memory/risk-profile.js`（M3 产出）已有 `memberImpressions.<name>.risk = { trapHappy, noGoTopics, refusedTitles }` 结构，M8 是**并行新增一个 `affection` 字段**，不是改 risk。
+- 现有 `relations.js` / `mood.js` / `memory-render.js`（`renderMemory` / `renderRiskNotes`）可参考。
+- 记忆三件套：日程 / 画像 / 主观认知（`src/bridge.js` 第 276 行注释）。
+
+**验收**：`memberImpressions` 支持好感度（如 `affection` 或 `affinity` 数值 + 可选标签）；`renderMemory` 印象行渲染好感度；单测覆盖「好感度增减、上限、不越界」；全量不回归。
+
+```
+你是 qq-bridge 的 M8 模块负责人（好感度系统）。
+先读 docs/feature-wishlist.md 的 §1、docs/trap-hardening-handover.md 第 6 节第 5 项，再读 src/memory/risk-profile.js（M3 同族结构）。
+工作目录：E:\DSH\qq-bridge-m8（分支 mod/m8-affection，已建好，node_modules 已联接）。
+
+任务：给 memberImpressions 增加「好感度 / 关系温度」，与 M3 的 risk（负面边界）互补，让机器人对不同人态度分化。
+只改 src/memory/*（新建纯函数）、src/content/memory-render.js、src/bridge.js 的记忆段、tests/*。
+不要碰 preset、src/guards/*、src/inbound/*（别的模块在用）。
+基线：node --test tests/*.test.mjs 当前 692，交付时不得低于 692。
+交付：单测 + 全量不回归 + commit；不部署、不合并不 push。
+结束前按四行汇报（改了什么 / 测试结果 / commit / 等谁下一步）。
+```
+
+### M9 思维链防抖（preset 层）
+
+**目标**：在 preset 人格里加「逐条思考再回复」的节奏约束，降低 AI 味（拟人化「读消息→思考→回复」）。只改 preset 源 `dsh/agent-presets/qq-chat-v2/agent.cordis.yml` + 生成物 patch + 相关测试。
+
+**背景事实（已核实）**：
+- preset 源在 `dsh/agent-presets/qq-chat-v2/agent.cordis.yml`，生成物是 `plugins/qq-agent-presets/presets/qq-chat-v2.patch.yml`（**禁止手改生成物**）。
+- 改源后必须 `node scripts/build-agent-preset-patches.mjs` → `--check` 通过。
+- 现有 `anti-ai-patterns.js`、长度软干预、唤醒前「行动前判断」提示词是「反 AI 味」的现有抓手，M9 是在 preset 层补「逐条思考」节奏。
+- 契约测试 `scripts/test-qq-preset-contract.mjs`（M6 修复后 7/7 绿）不能回归。
+
+**验收**：preset 加了「逐条思考再回复」的节奏约束；`build-agent-preset-patches.mjs --check` 通过；preset 契约测试不回归；全量不回归。
+
+```
+你是 qq-bridge 的 M9 模块负责人（思维链防抖，preset 层）。
+先读 docs/feature-wishlist.md 的 §2、docs/module-ownership.md 的 M9 任务书，再读 docs/guides/VOICE.md 无关可跳过。
+工作目录：E:\DSH\qq-bridge-m9（分支 mod/m9-think-debounce，已建好，node_modules 已联接）。
+
+任务：在 preset 人格里加「逐条思考再回复」的节奏约束，拟人化、降 AI 味。
+只改 dsh/agent-presets/qq-chat-v2/agent.cordis.yml（源）+ 生成物 patch + tests/*。
+不要碰 src/*（bridge 代码泳道是别的模块在改）。
+改源后必须 node scripts/build-agent-preset-patches.mjs 然后 --check 通过；禁止手改 patch。
+基线：node --test tests/*.test.mjs 当前 692，交付时不得低于 692；preset 契约 scripts/test-qq-preset-contract.mjs 保持 7/7 绿。
+交付：preset 改动 + patch --check 过 + 单测不回归 + commit；不部署、不合并不 push。
+结束前按四行汇报（改了什么 / 测试结果 / commit / 等谁下一步）。
+```
+
+### M10 QQ 资料管理探测（只读）
+
+**目标**：探测底层网关（SnowLuma / OneBot）**是否支持「改自己 QQ 全局头像/昵称/签名/状态」**。**只探测、不改任何功能代码**。探测清楚后回报结论，由主理人决定是否立项做真正的「资料管理」模块。
+
+**背景事实（已核实）**：
+- 当前桥接只封装了 `set_group_card`（改群名片），**没有** `set_qq_profile` / `set_self_profile` 之类「改自己全局资料」的接口。
+- `oneBotHttp(action, params)`（`src/bridge.js` 约 1825 行）是桥接调网关的统一入口，可用来探测。
+- 项目有探针脚本传统（`scripts/probe-*.mjs`，见 `docs/FOLDER_MAP.md`）：问 SnowLuma「实际支持什么」。
+- SnowLuma 是第三方网关，能力以它实际支持为准；OneBot v11 标准有 `set_qq_profile`（QQ 官方接口）、`set_group_card` 等，但 SnowLuma 是否实现需实测。
+
+**验收**：一份结论——「SnowLuma 是否支持改 QQ 全局资料；支持哪些字段（头像/昵称/签名/状态）；若不支持，是否有替代路径」。可提交一个 `scripts/probe-qq-profile.mjs`（只读探测脚本）。
+
+```
+你是 qq-bridge 的 M10 模块负责人（QQ 资料管理探测，只读）。
+先读 docs/feature-wishlist.md 的 §3、docs/FOLDER_MAP.md 的 probe 说明，再读 src/bridge.js 的 oneBotHttp（约 1825 行）与 set_group_card 封装（约 8606 行）。
+工作目录：E:\DSH\qq-bridge-m10（分支 mod/m10-profile-probe，已建好，node_modules 已联接）。
+
+任务：只读探测 SnowLuma/OneBot 是否支持「改自己 QQ 全局头像/昵称/签名/状态」。
+只允许新增 scripts/probe-qq-profile.mjs（只读探测脚本）；不改任何 src/*、preset 功能代码。
+探测方法：用 oneBotHttp 或直连 SnowLuma 试调 set_qq_profile / set_self_profile / get_login_info / get_status 等，观察返回（只探测「支不支持」，不要真的改资料）。
+交付：一份结论（支持哪些字段 / 不支持则有无替代路径）+ 可选探测脚本 commit；不部署、不合并不 push。
+结束前按四行汇报（改了什么 / 探测结论 / commit / 等谁下一步）。
+```
+
 ---
 
 ## 6. 完成定义（DoD，四个都满足才算完）
 
 1. 只改了自己模块清单里的文件（`git diff --name-only` 自查）；
-2. 全量测试通过（当前基线 **672**：656 起始 + M1 11 + M2 5；跑 `node --test tests/*.test.mjs` 不得低于 672），新增单测覆盖验收点；
+2. 全量测试通过（当前基线 **692**：656 起始 + M1 11 + M2 5 + M3 11 + M4 9；跑 `node --test tests/*.test.mjs` 不得低于 692），新增单测覆盖验收点；
 3. 已提交到自己的分支，报告 commit hash；
 4. 没有部署、没有合并、没有重启线上服务。
 
@@ -291,6 +372,9 @@ git worktree add ../qq-bridge-m2 -b mod/m2-preset-boundaries
 | M5 | 已完成 | mod/m5-ops-metrics | 841b51c | 三行指标已出 | 24h 观察待补 |
 | M6 | 已完成 | mod/m6-preset-contract | b0b1b76 | 契约 7/7 转绿 | 已合并 main，无需部署 |
 | M7 | 待开工 | mod/m7-voice-clone | — | — | 音色换声，独立泳道 |
+| M8 | 待开工 | mod/m8-affection | — | — | 好感度，bridge 泳道 |
+| M9 | 待开工 | mod/m9-think-debounce | — | — | 思维链防抖，preset 泳道 |
+| M10 | 待开工 | mod/m10-profile-probe | — | — | 资料探测，只读 |
 
 状态只允许四种：`待开工` / `进行中` / `待合并` / `已完成`。改状态时顺手写时间。
 
