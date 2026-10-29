@@ -56,7 +56,9 @@ const WEBP_VP8X = (() => {
 await test('extractMediaFromSegments 保留表情包字段（image / mface / face）', async () => {
   const h = await bridgeHarness();
   try {
-    const media = h.extractMediaFromSegments([
+    // 抽模块后 extractMediaFromSegments 返回 { ok, media }（契约 D 表要求 fail closed），
+    // 不再是裸数组；这里按新形状取值。
+    const { ok, media } = h.extractMediaFromSegments([
       {
         type: 'image',
         data: {
@@ -76,6 +78,7 @@ await test('extractMediaFromSegments 保留表情包字段（image / mface / fac
       { type: 'face', data: { id: '178', url: 'https://example.invalid/f.png', summary: 'doge' } },
       { type: 'text', data: { text: '普通文字' } }
     ]);
+    assert.equal(ok, true);
     assert.equal(media.length, 3);
     assert.equal(media[0].kind, 'image');
     assert.equal(media[0].emojiId, 'f96bf2d2d93c3530d5eb148f55206fb1', 'emoji_id 必须保留（否则失去 CDN 兜底）');
@@ -90,7 +93,8 @@ await test('extractMediaFromSegments 保留表情包字段（image / mface / fac
     assert.equal(media[2].faceId, '178');
     assert.equal(media[2].url, 'https://example.invalid/f.png');
 
-    assert.equal(await h.segmentsToText([{ type: 'mface', data: { summary: '给你糖吃' } }]), '[表情:给你糖吃]');
+    // 同理：segmentsToText 的返回值也从字符串改成 { ok, text }，取 .text 比对。
+    assert.equal((await h.segmentsToText([{ type: 'mface', data: { summary: '给你糖吃' } }])).text, '[表情:给你糖吃]');
   } finally { await h.close(); }
 });
 

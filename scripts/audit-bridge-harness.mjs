@@ -36,9 +36,40 @@ import * as ownerStats from '../src/owner-stats.js';
 import * as samples from '../src/samples.js';
 import * as dshPort from '../src/dsh-port.js';
 import { unwrap, createTurnCollector } from '../src/dsh-client.js';
+// 抽模块后遗症：harness 把 bridge.js 的源码塞进 vm 里 eval，被抽到 src/<域>/ 的函数在
+// 沙箱里没有定义。逐个手工补注定漏，所以这里**按 bridge.js 的 import 语句自动收集**：
+// 解析 `import { a, b as c } from './x/y.js'`，把模块导出按桥接里的名字（含 as 别名）
+// 注入沙箱。以后再有模块被抽出去，harness 自动跟上，不需要再改。
+let cachedBridgeModuleGlobals = null;
+async function collectBridgeModuleGlobals(root) {
+  if (cachedBridgeModuleGlobals) return cachedBridgeModuleGlobals;
+  const source = fs.readFileSync(path.join(root, 'src/bridge.js'), 'utf8');
+  const out = {};
+  const re = /import\s*\{([^}]+)\}\s*from\s*'\.\/([^']+)';/g;
+  let m;
+  while ((m = re.exec(source)) !== null) {
+    const specifiers = m[1].split(',').map((s) => s.trim()).filter(Boolean);
+    let ns;
+    try {
+      ns = await import(pathToFileURL(path.join(root, 'src', m[2])).href);
+    } catch {
+      continue; // 不是本仓模块 / 加载失败：跳过，由沙箱自身的桩负责
+    }
+    for (const sp of specifiers) {
+      const [origRaw, aliasRaw] = sp.split(/\s+as\s+/);
+      const orig = String(origRaw ?? '').trim();
+      const target = String(aliasRaw ?? origRaw ?? '').trim();
+      if (!orig || !target) continue;
+      if (ns[orig] !== undefined) out[target] = ns[orig];
+    }
+  }
+  cachedBridgeModuleGlobals = out;
+  return out;
+}
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 export async function bridgeHarness({ config = {}, savedState, files = {}, globals = {} } = {}) {
+  const extractedModuleGlobals = await collectBridgeModuleGlobals(root);
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-audit-bridge-'));
   fs.mkdirSync(path.join(temp, 'src'));
   fs.mkdirSync(path.join(temp, 'state'));
@@ -142,7 +173,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     collectors, setupSleepTimerV2,
     getInitialPrompt, setInitialPrompt, loadInitialPrompts, formatInitialPromptV2,
     initialPrompts, initialPromptMaxChars, promptBudgetCharsV2,
-    extractMediaFromSegments, segmentsToText, fetchOneBotImage, fetchMediaData, resolveMediaList,
+    extractMediaFromSegments, segmentsToText: normalizeSegments, fetchOneBotImage, fetchMediaData, resolveMediaList,
     emojiCdnCandidates, getImageDimensions, acceptImageBuffer, MAX_MEDIA_BYTES, bot,
     isConversationBusyV2, v2TurnStartAt, turnLeaseNoted, TURN_BUSY_LEASE_MS,
     settingFromDshNamespace, selfIdentityTextV2, buildWakeReminderPromptV2,
@@ -199,6 +230,8 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
       };
     },
     cleanupTemp: () => {},
+    // 被抽出到 src/<域>/ 的函数：源码 eval 时需要在沙箱里同名可见（放最后一批，globals 仍可覆盖）
+    ...extractedModuleGlobals,
     ...globals,
   });
   // Execute the pure model view in the bridge realm. Its plain-object checks

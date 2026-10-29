@@ -126,6 +126,9 @@ import { isAllowed } from './auth/allow.js';
 import { judgeHealth } from './observability/health.js';
 import { summarize as summarizeActivity } from './observability/activity.js';
 import { createCappedLogger, formatLine, localClock as localClockImpl } from './obs/log.js';
+import { singleLineForQQ as singleLineForQQImpl } from './outbound/send.js';
+import { computeGaps, clampGap } from './outbound/batch.js';
+import { shouldBlockSilentReply as shouldBlockSilentReplyImpl, shouldAuditKey as shouldAuditKeyImpl } from './outbound/recheck.js';
 import { redactSensitive as redactSensitiveArgs, sanitizeToolArgs as sanitizeToolArgsImpl, prepareToolLogEntry, prepareFeedbackEntry } from './obs/tool-log.js';
 import { wakePriority, isTimerWakeReason } from './scheduler/wake.js';
 import { needsPinyinBackfill } from './persist/migrations.js';
@@ -9312,11 +9315,9 @@ async function main() {
   }
 
   // ── 真人式分条发送 ──────────────────────────────────────────────────────
+  // 单行化规则搬进 src/outbound/send.js（纯字符串处理，17 条单测）。
   function singleLineForQQ(s) {
-    return String(s ?? '')
-      .replace(/\s*\n\s*/g, ' ')
-      .replace(/[ \t]{2,}/g, ' ')
-      .trim();
+    return singleLineForQQImpl(s);
   }
 
   // 超长段落：先按次要标点拆，再按字符硬拆，保证不丢内容、不退回单条长消息。
@@ -10458,40 +10459,14 @@ async function main() {
     return result;
   }
 
+  // 分条间隔计算搬进 src/outbound/batch.js（17 条单测）；这里保留原函数名与调用点，
+  // 只把"当前配置"和随机源注入进去（模块按契约不许自己调 Math.random）。
   function clampGapV2(ms, sendCfg) {
-    const min = Math.max(100, Number(sendCfg.burstIntervalMinMs) || 300);
-    const max = Math.max(min, Number(sendCfg.maxGapMs) || 10000);
-    return Math.max(min, Math.min(max, Math.round(Number(ms) || min)));
+    return clampGap(ms, sendCfg);
   }
 
   function computeGapsV2(messages, gapMode, gapMs, gaps, sendCfg) {
-    const delays = [];
-    if (!messages || messages.length <= 1) return delays;
-    const mode = gapMode === 'fixed' || gapMode === 'byLength' ? gapMode : 'auto';
-    if (mode === 'fixed') {
-      if (Array.isArray(gaps) && gaps.length >= messages.length - 1) {
-        for (let i = 0; i < messages.length - 1; i++) delays.push(clampGapV2(gaps[i], sendCfg));
-      } else {
-        const g = clampGapV2(Number(gapMs) || Number(sendCfg.burstIntervalMinMs) || 1000, sendCfg);
-        for (let i = 0; i < messages.length - 1; i++) delays.push(g);
-      }
-    } else if (mode === 'byLength') {
-      const base = Number(sendCfg.gapBaseMs) || 800;
-      const perChar = Number(sendCfg.gapPerCharMs) || 20;
-      for (let i = 0; i < messages.length - 1; i++) {
-        const chars = Math.max(1, String(messages[i] || '').length);
-        delays.push(clampGapV2(base + chars * perChar, sendCfg));
-      }
-    } else {
-      const longProb = Math.min(1, Math.max(0, Number(sendCfg.longGapProbability) || 0));
-      for (let i = 0; i < messages.length - 1; i++) {
-        const useLong = longProb > 0 && Math.random() < longProb;
-        const min = useLong ? (Number(sendCfg.longGapMinMs) || 5000) : (Number(sendCfg.burstIntervalMinMs) || 1000);
-        const max = useLong ? (Number(sendCfg.longGapMaxMs) || 10000) : (Number(sendCfg.burstIntervalMaxMs) || 3000);
-        delays.push(clampGapV2(randInt(Math.max(100, min), Math.max(100, max)), sendCfg));
-      }
-    }
-    return delays;
+    return computeGaps(messages, { ...sendCfg, mode: gapMode, gapMs, gaps, random: Math.random });
   }
 
   function sendMessagesV2(key, messages, delays, replyToMessageId, atUserId = null) {
@@ -10529,11 +10504,9 @@ async function main() {
   }
 
   // 审计范围：closed-agent 仅对 owner 私聊跳过；其余模式/会话一律审计
+  // 审计判定搬进 src/outbound/recheck.js；当前模式与 ownerQQ 作为入参，模块不读全局。
   function shouldAuditKey(key) {
-    if (currentMode === 'closed-agent') {
-      return !(key === `private:${String(cfg.ownerQQ ?? '')}`);
-    }
-    return true;
+    return shouldAuditKeyImpl(key, { mode: currentMode, ownerQQ: cfg.ownerQQ });
   }
 
   // 入队校验无法约束排队等待期间的权限变化，每条消息临近实际发送时再次校验。
@@ -10548,10 +10521,9 @@ async function main() {
     };
   }
 
-  // 静默模式：除 owner 私聊外，不发送任何在途 AI 回复。
+  // 静默模式：除 owner 私聊外，不发送任何在途 AI 回复。判定搬进 src/outbound/recheck.js。
   function shouldBlockSilentReply(key) {
-    const roleState = readRoleState();
-    return roleState.mode === 'silent' && key !== `private:${String(cfg.ownerQQ ?? '')}`;
+    return shouldBlockSilentReplyImpl(readRoleState(), { ownerQQ: cfg.ownerQQ });
   }
 
   // ── 出站内容守卫（guardOutboundV2）：称呼越界 / 元信息泄漏 统一判定 ──────────
