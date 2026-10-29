@@ -13,6 +13,7 @@
 // 排序复用同域的 memory-score，不另写一套衰减公式。
 
 import { rank as rankMemories } from './memory-score.js';
+import { hasAffection, normalizeAffection, describeAffection } from '../memory/affection-profile.js';
 
 export const spec = Object.freeze({
   name: 'content/memory-render',
@@ -53,6 +54,19 @@ function renderRiskNotes(im) {
     notes.push('边界：不叫亲属称呼，用名字或「你」');
   }
   return notes.length ? `（${notes.join('；')}）` : '';
+}
+
+/**
+ * @pure 把一条印象的好感度（affection.score / affection.tags）拼成印象行末尾的说明。
+ * 没写过好感度返回空串（不给没记录的人凭空补「一般」，保证老数据渲染不变）。
+ * 档位文案由 memory/affection-profile 决定，本模块只管排版。
+ */
+function renderAffectionNote(im) {
+  if (!hasAffection(im)) return '';
+  const { score, tags } = normalizeAffection(im.affection);
+  const label = describeAffection(score);
+  const tagPart = tags.length ? `；关系标签：${tags.join('、')}` : '';
+  return `（好感度 ${score}·${label}${tagPart}）`;
 }
 
 /**
@@ -105,6 +119,8 @@ export function renderMemory(st, { now, limits } = {}) {
   //    风险档案（risk.trapHappy / risk.noGoTopics / risk.refusedTitles）追加到印象行末尾，
   //    让模型下次唤醒直接看到「此人爱下套 / 哪些话题不能接 / 哪些称呼已拒绝」，不用重新谈判。
   //    没有 risk.refusedTitles 的老数据退回 noKinshipTitle 的旧文案（兼容 2026-10-29 前落盘的档案）。
+  //    好感度（affection.score / affection.tags）排在边界之前：先写「跟这人多熟」，再写「哪些不能碰」，
+  //    没写过好感度的老数据不渲染这一段（见 renderAffectionNote）。
   //
   //    —— 10 条上限（impressionLimit，默认 10）说明 ——
   //    注入窗口只有几百字，三类记忆都要挤进去，所以印象只取「最后 N 个名字」。
@@ -121,8 +137,9 @@ export function renderMemory(st, { now, limits } = {}) {
       const im = impressions[name] || {};
       const traits = Array.isArray(im.traits) ? im.traits : [];
       const count = Number(im.interactionCount) || 0;
+      const affection = renderAffectionNote(im);
       const boundary = renderRiskNotes(im);
-      lines.push(`- ${name}：${traits.length ? traits.join('、') : '暂无记录'}（互动 ${count} 次）${boundary}`);
+      lines.push(`- ${name}：${traits.length ? traits.join('、') : '暂无记录'}（互动 ${count} 次）${affection}${boundary}`);
     }
   }
 

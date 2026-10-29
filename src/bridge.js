@@ -113,6 +113,7 @@ import { createRelationStore } from './content/relation-store.js';
 import { renderMemory as renderMemoryV2 } from './content/memory-render.js';
 import { renderMemoryMarkdown } from './content/memory-export.js';
 import { markKinshipRefusal } from './memory/risk-profile.js';
+import { adjustAffection, KINSHIP_COOLING_DELTA } from './memory/affection-profile.js';
 import { nextInterval } from './scheduler/interval.js';
 import { matchTriggers } from './scheduler/triggers.js';
 import { shouldRotate } from './session/expiry.js';
@@ -10678,6 +10679,8 @@ async function main() {
   // 记不上不影响发送：这里任何异常都只是少一条提示。
   // 判定与档案结构都在 src/memory/risk-profile.js（纯函数，单测覆盖 tests/memory-boundary.test.mjs），
   // 这里只负责取状态、把返回值写回、落盘；群聊在取状态前就短路，避免为群会话新建/写入状态。
+  // 同一次拒绝连带下调好感度（memory/affection-profile 的 KINSHIP_COOLING_DELTA）：
+  // 边界记「不能叫」，温度记「刚闹过别扭」，两个字段由各自模块负责，互不改写。
   function markKinshipRefusalV2(key) {
     try {
       if (!String(key).startsWith('private:')) return;
@@ -10688,7 +10691,7 @@ async function main() {
         memberImpressions: st.memberImpressions
       });
       if (!result) return;
-      st.memberImpressions = result.memberImpressions;
+      st.memberImpressions = adjustAffection(result.memberImpressions, result.name, KINSHIP_COOLING_DELTA);
       saveSocialV2State();
     } catch (error) {
       log(`⚠️ [guard] 记录称呼边界失败：${error?.message ?? error}`);
@@ -12725,11 +12728,20 @@ async function main() {
       const old = st.memberImpressions[target] || {};
       const traits = Array.isArray(old.traits) ? old.traits.slice(0, 10) : [];
       if (text && !traits.includes(text.slice(0, 50))) traits.push(text.slice(0, 50));
+      // 用 ...old 铺底：印象条目上还挂着 M3 的 risk / noKinshipTitle 和 M8 的 affection，
+      // 这里只改 traits / 互动次数 / 最近一次，整体重建会把那些字段抹掉。
       st.memberImpressions[target] = {
+        ...old,
         traits,
         interactionCount: (Number(old.interactionCount) || 0) + 1,
         lastSeenAt: Date.now()
       };
+      // 可选：随这次印象一起调好感度（extra.affectionDelta，正负皆可）。
+      // 目前只有 HTTP/管理端会带这个字段，模型侧工具 schema 还没暴露它（那个文件不属本模块）。
+      const affectionDelta = Number(extra.affectionDelta);
+      if (Number.isFinite(affectionDelta) && affectionDelta !== 0) {
+        st.memberImpressions = adjustAffection(st.memberImpressions, target, affectionDelta);
+      }
       const impressionEntries = Object.entries(st.memberImpressions);
       if (impressionEntries.length > 50) {
         impressionEntries.sort((a, b) => (Number(a[1]?.lastSeenAt) || 0) - (Number(b[1]?.lastSeenAt) || 0));
