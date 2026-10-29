@@ -26,13 +26,13 @@
 | E2 亲属称呼施压 | ✅ 出站硬拦 + 记忆边界，已上线 |
 | 假传指令 | ✅ 改为「先要证据」，已上线（15:29 生效） |
 | 不复述 / 情感撤退 / 收尾不补称呼 | ⚠️ 仅提示词，无代码判定 |
-| E3 技术探询统一话术 | ❌ 未做 |
-| E7 群内可疑文件 | ❌ 未做；10-29 15:22 它仍对可疑 .txt 接了话 |
-| P2 四项（风险档案 / 点名判断 / 审计指标 / 可疑文件） | ❌ 未做 |
-| AI 味改造 R1~R5 | R1 例句黑名单 ✅ 已上线（16:42，656 测试）；R2~R5 ❌ 未做 |
-| 真实命中 | **0 次**（截至 10-29 16:45）——三道防线都未被真实消息触发过 |
+| E3 技术探询统一话术 | ✅ 已上线（17:24，M2 preset） |
+| E7 群内可疑文件 | ✅ 已上线（17:23，M1 入站拦截 `[guard] suspicious-file`） |
+| P2 四项（风险档案 / 点名判断 / 审计指标 / 可疑文件） | 审计指标 ✅（M5）、可疑文件 ✅（M1）；风险档案 / 点名判断 ❌ 未做 |
+| AI 味改造 R1~R5 | R1 ✅（16:42）；R2~R5 ✅（17:24，M2）——都还没被真实流量验证 |
+| 真实命中 | **0 次**（截至 10-29 17:25）——五道防线都未被真实消息触发过 |
 
-一句话：**最坏的两类事故（敏感人名、被叫爷爷）已经在发送前拦住，但还没被真实场景验证；其余问题原样留着。**
+一句话：**最坏的几类事故（敏感人名、被叫爷爷、背台词、可疑文件）都已在发送前/入站侧拦住，但都还没被真实场景验证；剩风险档案、点名判断与 24h 观察。**
 
 ---
 
@@ -64,12 +64,15 @@
 | 14:53 | `deploy.ps1 -SkipTests` | 补传 2 个文件，重启，`active`；备份 `src.bak-145349` |
 | 15:29 | 第二次 patch（假传指令改版）+ 重启 `dsh-web` | 15:29:16 起生效 |
 | 16:42 | `deploy.ps1` 第三次：R1 例句拦截（`bridge.js` + `guards/outbound-content.js`） | 2/2 文件上传，`active`；备份 `src.bak-164220` |
+| 17:22–17:24 | 第四次发布：合并 M1 `ab6542a` / M2 `a2573b3` / M5 `841b51c` → `deploy.ps1`（M1 src）+ scp patch（M2）+ 重启 `dsh-web`（M5 纯脚本无需上线） | 全绿 672；备份 `src.bak-172224`、patch 备份 `qq-chat-v2.patch.yml.bak-1723`；部署锁 `.deploy-lock` 已释放 |
 
 **回滚点（记清楚，别搞错）**
 
 | 目的 | 用什么 | 说明 |
 | --- | --- | --- |
-| 代码整轮回滚（含 R1） | `/opt/qq-bridge/src.bak-164220` | **R1 上线前的完整快照**，当前最新回滚点 |
+| 代码整轮回滚（含 M1） | `/opt/qq-bridge/src.bak-172224` | **M1 上线前的完整快照**，当前最新回滚点 |
+| preset 回滚（含 M2） | `.../presets/qq-chat-v2.patch.yml.bak-1723` | M2 上线前的 patch |
+| 代码整轮回滚（含 R1） | `/opt/qq-bridge/src.bak-164220` | R1 上线前的完整快照 |
 | 代码整轮回滚（到本轮加固前） | `/opt/qq-bridge/src.bak-144829` | 本轮改动前的完整快照 |
 | （陷阱） | `/opt/qq-bridge/src.bak-145349` | 是「只传了 bridge.js」的**半传状态**快照，用它回滚会得到「新 bridge + 旧模块」的错配，别用 |
 | preset 回滚 | `.../presets/qq-chat-v2.patch.yml.bak-1449` | 本轮改动前的 patch（14:08 版） |
@@ -97,13 +100,14 @@ ssh root@175.178.200.118 "cp -a /opt/qq-bridge/plugins/qq-agent-presets/presets/
 
 | 项 | 证据 |
 | --- | --- |
-| 单测 | `node --test tests/*.test.mjs` → **656 通过 / 0 失败**（原 649 + R1 的 7 条） |
+| 单测 | `node --test tests/*.test.mjs` → **672 通过 / 0 失败**（656 + M1 的 11 + M2 的 5） |
 | preset 契约 | `node scripts/test-agent-preset-patches.mjs` → 通过 |
 | 线上模块 | 在服务器跑 `evaluateContent`：实体命中→拦、称呼命中→拦、owner 私聊→放行（`entity false entity / kinship false kinship / owner true`） |
 | R1 线上判定 | `床以外都是远方`→`presetEcho` 拦；`行吧，床以外都是远方，睡`→拦；`今天的运动量还行`→放行 |
-| 文件一致 | 三个 src 文件 + patch 的 md5 本地/远端完全一致 |
+| M1 线上判定 | `PC电脑资源大合集打开即可下载 .txt`→可疑（3 命中）；`毕业照.jpg`→放行；正文「我去下载个东西」→放行 |
+| 文件一致 | src + patch 的 md5 本地/远端完全一致 |
 | 服务 | `qq-bridge` / `dsh-web` 均 `active` |
-| 真实拦截 | **0 次**（`entity-blocked` 0、`kinship-blocked` 0、`preset-echo` 0）——见第 7 节 |
+| 真实拦截 | **0 次**（`entity-blocked` 0、`kinship-blocked` 0、`preset-echo` 0、`suspicious-file` 0）——见第 7 节 |
 
 ---
 
