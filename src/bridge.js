@@ -10699,6 +10699,7 @@ async function main() {
   // 这里只负责取状态、把返回值写回、落盘；群聊在取状态前就短路，避免为群会话新建/写入状态。
   // 同一次拒绝连带下调好感度（memory/affection-profile 的 KINSHIP_COOLING_DELTA）：
   // 边界记「不能叫」，温度记「刚闹过别扭」，两个字段由各自模块负责，互不改写。
+  // M13：纯函数顺带把触发它的那条原话存成 evidence（kind:'kinship'），唤醒时能看到「当时是怎么说的」。
   function markKinshipRefusalV2(key) {
     try {
       if (!String(key).startsWith('private:')) return;
@@ -10706,7 +10707,8 @@ async function main() {
       const result = markKinshipRefusal({
         key,
         recentMessages: st.recentMessages,
-        memberImpressions: st.memberImpressions
+        memberImpressions: st.memberImpressions,
+        now: Date.now()
       });
       if (!result) return;
       st.memberImpressions = adjustAffection(result.memberImpressions, result.name, KINSHIP_COOLING_DELTA);
