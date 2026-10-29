@@ -53,7 +53,7 @@
 | `inbound/segments` | 需合并 | **已上线** | 消息段 → 纯文本（两遍：带引用/纯文本）+ 媒体元数据提取 | `src/inbound/segments.js`（`normalizeSegments` / `extractMediaFromSegments`） |
 | `inbound/media` | 需合并 | 不切 | 媒体取回与预算：单条上限、跨媒体累积字节预算、GIF 抽帧、OCR/ASR | `resolveMediaList` / `fetchMediaData` / `enrichIncomingMediaV2` / `ocrImageText` / `pttTextFor` |
 | `inbound/gif` | 已存在 | 已上线 | GIF 判定与抽帧拼分镜图 | `src/gif-frames.js` |
-| `inbound/message` | **待新建** | — | 统一入站消息 DTO（目前 `handleIncoming` 与 `appendSocialV2Message` 各自拼装） | 无 |
+| `inbound/message` | **待新建** | 契约已定 | 统一入站消息 DTO（三个构造点：`appendRecentMessage` / `appendSocialV2Message` / `handleIncoming` 的 msg） | 无；契约见 `docs/inbound-message-dto.md` |
 | `inbound/command` | 需合并 | 未动 | 管理命令解析（`/role` `/silent` `/active` `/reset` `/status`）与转发审批码 | `handleIncoming` 命令拦截段 / `handlePendingAnswer` |
 
 ## A.5 调度 scheduler（3）
