@@ -14,7 +14,7 @@
 | --- | --- |
 | 契约里 30 个"需合并"模块 | 15 个接线并上线、8 个判定不接（其中 4 个文件已删）、7 个未动（安全/提示词相关） |
 | 契约 63 个域模块 | 全部有处置结论，无"待接线"项 |
-| 单测 | 618 条（新式）+ `scripts/test-*.mjs` 老脚本全绿 |
+| 单测 | 630 条（新式）+ `scripts/test-*.mjs` 老脚本全绿 |
 | 桥接体积 | 删掉约 2.3k 行内联实现，`bridge.js` 只剩 IO 与能力注入 |
 
 **落地顺序**：`persist/atomic` + `obs/log`（地基）→ 纯函数批（length / outbound-content / health / tool-log / batch / recheck / migrations / heal-token / segments）→ 调度批（wake / chain）→ 会话批（判定不接）→ `outbound/send`（单行化 + 超长拆分）→ 影子批（`session/router`、`inbound/message`）。
@@ -32,7 +32,9 @@
 - `scripts/deploy.ps1`：单测 → md5 对账 → 备份 → 上传差异 → 重启 → 校验（非 active 自动回滚）
 - `scripts/ops-daily-check.sh` + crontab 09:05：只读采集，报告留存 14 份
 - Trae 定时任务（10:30）：解读报告，含 router / inbound-message / triggers 影子分歧
-- `scripts/audit-bridge-harness.mjs`：改为按 `bridge.js` 的 import 语句自动注入沙箱，以后再抽模块不用改脚手架
+- `scripts/audit-bridge-harness.mjs`：改为按 `bridge.js` 的 import 语句自动注入沙箱，以后再抽模块不用改脚手架；`NodeApiClient` 桩固定在自动注入之后覆盖，防止测试访问真实 DSH
+- 轮换 idle 闸：用户消息触发的唤醒使用入库前 `lastIncomingAt`，修掉“超龄会话永远无法被用户消息轮换”的时序问题
+- mod 系统 v1：`mods/loader` + `mods/host`，接通 `inbound.observe / outbound.observe / wake.before / tick.daily`；异常隔离、200 字预算、200ms tick 超时，空目录零行为（630 条单测）
 
 ---
 
@@ -43,7 +45,7 @@
 | 1 | 去掉「回复后立刻 `qq_wait_for_messages`」，只留睡前观察 | 调用量 ≈ −8% | 发完消息后不再"等你补充"，等下次唤醒才接 | 未动 |
 | 2 | 睡前观察 5 分钟 → 2 分钟 | ≈ −10~12% | "陪一会儿"的耐心变短 | 未动 |
 | 3 | 是否给 `inbound/message` 扩大影子（现在只比媒体归一） | 更快暴露 DTO 分歧 | 需要改三处构造点 | 只比媒体 |
-| 4 | 是否接 mod 挂点（`loader` 已就绪） | 加 mod 不用改中枢 | 4 个挂点要维护；空目录时是空转 | 暂缓 |
+| 4 | ~~是否接 mod 挂点~~ | 加 mod 不用改中枢 | 4 个挂点要维护；空目录时是空转 | ✅ v1 已完成 |
 
 **决策原则**：动到她说话方式的（1、2）由 owner 拍板；纯观测的（3、4）可以随时做。
 
@@ -54,8 +56,7 @@
 | 项 | 为什么暂缓 | 什么条件满足再做 |
 | --- | --- | --- |
 | `tools/registry` | 现在没有"工具类"新模块，建出来是空表 | 第一个 mod 工具出现时（那天顺手建，一出生就有真实条目） |
-| mod 挂点接线 | `loader` 已可用，但没 mod 可加载 | 真有第一个 mod 要写时 |
-| 热加载（mod） | ESM 缓存失效 + 已注册挂点撤销是两个坑 | v2；先让静态加载稳定运行一段时间 |
+| 热加载 / 控制台 mod 列表 | ESM 缓存失效 + 已注册挂点撤销是两个坑；当前只能重启生效、开关直接读 `module-switches.json` | v2；先让静态加载稳定运行一段时间 |
 
 ---
 
@@ -75,6 +76,7 @@ D.2 里已删文件的 4 个（`session/store`、`session/social-state`、`sessi
 
 | 时间 | 看什么 | 判据 |
 | --- | --- | --- |
+| 00:05 | mod `tick.daily` | 有 mod 时应出现 `[mods] 每日 tick`；失败只应 warn |
 | 09:00 | 定时自检 `[health]` | 必须存在且 OK；影子分歧累计应为 0 |
 | 09:05 | 服务器 cron 生成报告 | 服务 active、fatal-errors=0、warn 只来自上游 |
 | 10:30 | Trae 定时解读 | 与基线对比：`inputMiss`、owner 单次 `cacheHit` |
@@ -87,7 +89,7 @@ D.2 里已删文件的 4 个（`session/store`、`session/social-state`、`sessi
 
 | 项 | 说明 |
 | --- | --- |
-| idle 闸时序 | 用户在 `pushMessage` 里刷新 `lastIncomingAt`，导致"发消息永远触发不了轮换"；目前靠主动唤醒触发。修法：判定用 `pushMessage` 之前的旧值 |
+| idle 闸时序 | **已修复**：用户消息触发的唤醒沿链携带入库前 `lastIncomingAt`；主动唤醒仍按当前时间判定 |
 | 两套日志路径 | `/root/dsh-run/bridge.log`（systemd stdout）与 `/opt/qq-bridge/state/bridge.log`（桥自带轮转）。查日志时注意区分 |
 | SnowLuma 抖动 | 约每 10 分钟一次 `good=false`，均自愈；抖动期间入站消息可能丢，属上游 |
 | 控制台令牌 | 启动日志显示"未配置，自动生成"；`/api/socialV2/rotation/preview` 401 是进程内 token 与 state 文件不同步 |

@@ -165,7 +165,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
   return {
     ensureSession, ensureSlangLearnerSession, resolvePresetName, deliverPrompt, drainPromptQueue,
     sendToQQ, sendStickerV2, handleIncoming, startConsoleServer, cfg, state, api, promptQueues,
-    getSocialV2State, appendSocialV2Message, acknowledgeMessagesV2, readThroughSeqV2, recordSentMessagesV2,
+    getSocialV2State, appendSocialV2Message, acknowledgeMessagesV2, readThroughSeqV2, recordSentMessagesV2, modHost,
     buildWakePromptV2, buildWakeSnapshotV2, sendWakePromptV2, socialV2,
     requestForwardV2, decideForwardApprovalV2, forwardSettings, loadForwardApprovals,
     enrichIncomingMediaV2, decorateForwardMediaOcr, ocrImageText, pttTextFor, mediaConfig, shouldAutoPtt,
@@ -194,7 +194,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
   bot.onPrivateMessage(async (event) => {`);
   const timers = new Set();
   const context = vm.createContext({
-    fs, os, path, http, net, crypto, fileURLToPath, URL, Buffer, AbortSignal, console: { log() {}, error() {} },
+    fs, os, path, http, net, crypto, fileURLToPath, pathToFileURL, URL, Buffer, AbortSignal, console: { log() {}, error() {} },
     fetch: fakeFetch,
     // 锁文件探测用（bridge.js 顶层的 consolePortInUse）；
     // 固定桩掉：测试不应该真去 netstat 宿主机。
@@ -204,7 +204,6 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     process: { pid: process.pid, platform: process.platform, kill: process.kill, env: {}, exit: (code) => { throw new Error('unexpected exit ' + code); } },
     setTimeout: (fn, ms) => { const timer = setTimeout(fn, ms); timers.add(timer); return timer; },
     clearTimeout, setInterval: () => ({ unref() {} }), clearInterval: () => {},
-    NodeApiClient: class { constructor() { return api; } },
     SnowLumaWebSocketClient: FakeBot, text: (s) => s,
     discoverDshLaunchToken: () => '', unwrap, createTurnCollector,
     ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...slang, ...sticker,
@@ -232,13 +231,20 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     cleanupTemp: () => {},
     // 被抽出到 src/<域>/ 的函数：源码 eval 时需要在沙箱里同名可见（放最后一批，globals 仍可覆盖）
     ...extractedModuleGlobals,
+    // 自动注入也会从 dsh-client.js 收集到真实 NodeApiClient；测试必须强制用回本地桩，
+    // 否则沙箱会访问真实 DSH，所有会话创建测试都会以 fetch failed 失败。
+    NodeApiClient: class { constructor() { return api; } },
     ...globals,
   });
   // Execute the pure model view in the bridge realm. Its plain-object checks
   // should see the same prototypes as real bridge messages, just as in Node.
   const modelViewSource = fs.readFileSync(path.join(root, 'src/qq-model-view.js'), 'utf8').replace(/^export /gm, '');
   vm.runInContext(`Object.assign(globalThis, (() => { ${modelViewSource}\nreturn { compactModelMessage, compactModelData, serializeModelData }; })());`, context);
-  vm.runInContext(source + '\nglobalThis.auditReady = main();', context);
+  // mod 加载器会在 bridge 里动态 import 真实文件；vm 默认禁用动态 import，
+  // 必须显式允许使用主上下文默认加载器，否则 mod 会被记账为 load-failed。
+  vm.runInContext(source + '\nglobalThis.auditReady = main();', context, {
+    importModuleDynamically: vm.constants.USE_MAIN_CONTEXT_DEFAULT_LOADER
+  });
   const bridge = await context.auditReady;
   bridge.setPresets(['standard', 'qq-chat', 'qq-chat-v2']);
   bridge.setReady(true);

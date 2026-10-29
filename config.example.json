@@ -54,6 +54,14 @@
   "security": {
     "interceptNotify": true
   },
+  "mods": {
+    "enabled": true,
+    "dir": "mods",
+    "limits": {
+      "wakeAppendChars": 200,
+      "tickTimeoutMs": 200
+    }
+  },
   "slang": {
     "enabled": true,
     "extractMinMessages": 10,

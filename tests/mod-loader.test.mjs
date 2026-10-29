@@ -28,13 +28,13 @@ function manifest(id, overrides = {}) {
 }
 
 /** 每个用例都有独立临时 mods 目录；加载器拿到的仍是三个假 IO 注入。 */
-function harness(t, definitions) {
+function harness(t, definitions, overrides = {}) {
   const root = mkdtempSync(join(tmpdir(), 'qq-bridge-mod-loader-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
 
   const raws = new Map();
   const byId = new Map();
-  const calls = { imports: [], setups: [], registrations: [], logs: [] };
+  const calls = { imports: [], setups: [], registrations: [], logs: [], audits: [] };
   const active = new Map();
   let registrationId = 0;
 
@@ -51,6 +51,7 @@ function harness(t, definitions) {
 
   const ctx = {
     log: (level, msg, meta) => calls.logs.push({ level, msg, meta }),
+    audit: (line) => calls.audits.push(line),
     registerHook(name, handler, owner) {
       const key = `${owner.id}:${name}:${registrationId++}`;
       active.set(key, { id: owner.id, name, handler });
@@ -85,7 +86,7 @@ function harness(t, definitions) {
     ctx,
     injections,
     calls,
-    loader: createModLoader(injections),
+    loader: createModLoader({ ...injections, ...overrides }),
     activeHooks: () => [...active.values()].map(({ id, name }) => `${id}:${name}`).sort()
   };
 }
@@ -141,6 +142,45 @@ test('正常单 mod：导入、setup、注册声明挂点并返回 loaded id', a
   assert.deepEqual(h.calls.imports, [{ entry: './index.js', id: 'alpha' }]);
   assert.deepEqual(h.calls.setups, ['alpha']);
   assert.deepEqual(h.activeHooks(), ['alpha:tick.daily']);
+});
+
+test('setup 的审计自动带 mod 身份，不能伪造来源', async (t) => {
+  const h = harness(t, [{
+    manifest: manifest('audited'),
+    module: {
+      setup(ctx) { ctx.audit('setup line'); },
+      hooks: {}
+    }
+  }]);
+  await h.loader.load(h.ctx);
+  assert.deepEqual(h.calls.audits, ['[mod:audited] setup line']);
+});
+
+test('isEnabled：关闭的 mod 不导入；关闭依赖会按 missing-dep 传播', async (t) => {
+  const h = harness(t, [
+    { manifest: manifest('off') },
+    { manifest: manifest('consumer', { depends: [{ id: 'off', version: '*' }] }) },
+    { manifest: manifest('on') }
+  ], { isEnabled: async (item) => item.id !== 'off' });
+
+  const out = await h.loader.load(h.ctx);
+  assert.deepEqual(out.loaded, ['on']);
+  assert.deepEqual(out.skipped, [
+    { id: 'off', reason: 'disabled' },
+    { id: 'consumer', reason: 'missing-dep:off' }
+  ]);
+  assert.deepEqual(h.calls.imports.map((item) => item.id), ['on']);
+});
+
+test('isEnabled 抛错：只跳过该 mod，不让加载器整体失败', async (t) => {
+  const h = harness(t, [
+    { manifest: manifest('broken-check') },
+    { manifest: manifest('healthy') }
+  ], { isEnabled: (item) => { if (item.id === 'broken-check') throw new Error('check failed'); return true; } });
+
+  const out = await h.loader.load(h.ctx);
+  assert.deepEqual(out.loaded, ['healthy']);
+  assert.deepEqual(out.skipped, [{ id: 'broken-check', reason: 'disabled-check-failed:check failed' }]);
 });
 
 test('多 mod 依赖：输入乱序仍按拓扑顺序加载', async (t) => {

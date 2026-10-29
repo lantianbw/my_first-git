@@ -330,6 +330,10 @@ function registrationContext(baseCtx, manifest, registrations, log) {
   modCtx.registerHook = registerHook;
   modCtx.hooks = Object.create(ctx.hooks && typeof ctx.hooks === 'object' ? ctx.hooks : null);
   modCtx.hooks.register = registerHook;
+  // setup 的审计也必须带 mod 身份，否则中枢只看到一行来源不明的文本。
+  if (typeof ctx.audit === 'function') {
+    modCtx.audit = (line) => ctx.audit(`[mod:${manifest.id}] ${String(line ?? '')}`);
+  }
   modCtx.rollback = () => rollback(registrations, log, manifest.id);
   return modCtx;
 }
@@ -338,7 +342,7 @@ function registrationContext(baseCtx, manifest, registrations, log) {
  * 构造加载器。注入签名：listDirs()、readManifest(dirName)、importEntry(entry, manifest)。
  * load(ctx) 的 ctx 可选；中枢可提供 registerHook(name, handler, manifest) => dispose。
  */
-export function createModLoader({ listDirs, readManifest, importEntry, log }) {
+export function createModLoader({ listDirs, readManifest, importEntry, isEnabled, log }) {
   return {
     async load(ctx = {}) {
       const loaded = [];
@@ -382,6 +386,19 @@ export function createModLoader({ listDirs, readManifest, importEntry, log }) {
           skip(manifest.id, 'locked-not-allowed');
           continue;
         }
+        if (typeof isEnabled === 'function') {
+          let enabled;
+          try {
+            enabled = await isEnabled(manifest);
+          } catch (error) {
+            skip(manifest.id, `disabled-check-failed:${messageOf(error)}`);
+            continue;
+          }
+          if (enabled !== true) {
+            skip(manifest.id, 'disabled');
+            continue;
+          }
+        }
         manifests.push(manifest);
       }
 
@@ -422,6 +439,7 @@ export async function handle(ctx, args = {}) {
     listDirs: args?.listDirs,
     readManifest: args?.readManifest,
     importEntry: args?.importEntry,
+    isEnabled: args?.isEnabled,
     log: args?.log ?? ctx?.log
   });
   const value = await loader.load(ctx);

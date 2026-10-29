@@ -28,7 +28,7 @@ QQ 客户端 ⇄ SnowLuma（ws://127.0.0.1:3001） ⇄ 桥接 bridge.js（:3100 
 | --- | --- |
 | 仓库 | `E:\DSH\qq-bridge`（git，主分支 `main`） |
 | Node | `C:\Users\18439\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe` |
-| 单测 | `node --test tests/*.test.mjs`（当前 **618 通过**） |
+| 单测 | `node --test tests/*.test.mjs`（当前 **630 通过**） |
 | 老脚本测试 | `node scripts/test-voice.mjs` 等（另一套，见 3.3） |
 
 ### 2.2 远端服务器
@@ -87,15 +87,16 @@ ssh root@175.178.200.118 "rm -rf /opt/qq-bridge/src && cp -a /opt/qq-bridge/src.
 
 | 体系 | 位置 | 说明 |
 | --- | --- | --- |
-| 新式（主） | `tests/*.test.mjs` | 618 条，`node --test` 一把跑完 |
+| 新式（主） | `tests/*.test.mjs` | 630 条，`node --test` 一把跑完 |
 | 老式（保留） | `scripts/test-*.mjs` | 把 `bridge.js` 源码塞进 vm eval，跑真实链路桩。**不要删**，`package.json` 的 `test:*` 入口依赖它们 |
 
-老式体系的坑：抽模块后沙箱里没有那些函数。`scripts/audit-bridge-harness.mjs` 已改为**按 bridge.js 的 import 语句自动注入**，新增模块无需改脚手架。
+老式体系的坑：抽模块后沙箱里没有那些函数。`scripts/audit-bridge-harness.mjs` 已改为**按 bridge.js 的 import 语句自动注入**，新增模块无需改脚手架；注入后再强制覆盖回 `NodeApiClient` 测试桩，避免沙箱访问真实 DSH。
 
 ### 3.4 自动化任务
 
 | 时间 | 谁 | 做什么 |
 | --- | --- | --- |
+| 00:05–02:05 | 桥自带定时器 | `mods` 的 `tick.daily`（日期幂等，`state/mods-last.json`） |
 | 09:00 | 桥自带定时器 | 自检写 `[health]` 行 |
 | 09:05 | 服务器 crontab | `/opt/qq-bridge/scripts/ops-daily-check.sh` 生成巡检报告 |
 | 10:30 | Trae 定时任务（ID `64240d86`） | 读取报告 + 对比基线 + 输出结论，**只读不改** |
@@ -113,7 +114,9 @@ src/
   bridge.js            # 中枢（约 15k 行）：唯一持有状态与调度
   <domain>/<module>.js # 63 个域模块，14 个域（见 module-catalog.md）
   core/session-router.mjs
-mods/<id>/             # mod 目录（loader 已就绪，挂点未接）
+  mods/loader.js       # mod 清单/依赖/静态加载（fail open）
+  mods/host.js         # 4 个挂点的白名单、异常隔离、预算与超时
+mods/<id>/             # 外挂 mod（v1 已接 4 个挂点）
 scripts/
   deploy.ps1           # 部署
   ops-daily-check.sh   # 巡检采集
@@ -136,8 +139,9 @@ docs/                  # 本文件 + 四份设计/目录文档
 | --- | --- |
 | 线上版本 | 2026-10-29 12:37:29 起，`active` |
 | 本地/远端 src | 94 / 94 文件，md5 完全一致 |
-| 测试 | 618 通过；router 33 条；`test-voice` 83/0 |
+| 测试 | 630 通过；router 33 条；`test-voice` 83/0 |
 | 模块 | 契约 63 个全部有处置：15 上线、8 判定不接（4 已删）、其余早已在跑；**无待接线** |
+| mod 系统 | v1 已上线：`mods/loader + mods/host`，挂点 `inbound.observe / outbound.observe / wake.before / tick.daily`；无 mod 时零行为 |
 | 影子 | `session/router`、`inbound/message`、`scheduler/triggers` 均在跑，**分歧 0** |
 | 历史裁剪 | `maxAgeHours=12`（原 24）；一次轮换把 owner 会话 460k → 41.6k（−91%） |
 | 缓存 | 输入命中率 **98.8%** |
@@ -148,7 +152,7 @@ docs/                  # 本文件 + 四份设计/目录文档
 
 | 项 | 现象 | 备注 |
 | --- | --- | --- |
-| 轮换的 idle 闸时序 | 用户发消息**永远触发不了轮换**（`pushMessage` 先刷新 `lastIncomingAt`，判定再读它） | 目前靠主动唤醒触发；修法是用刷新前的旧值 |
+| 轮换的 idle 闸时序 | **已修复**：用户消息触发的唤醒沿链使用入库前 `lastIncomingAt` | 由 `tests/bridge-rotation-idle.test.mjs` 锁定；主动唤醒仍读当前值 |
 | SnowLuma 抖动 | 约每 10 分钟 `good=false`，均 30 秒内自愈 | 抖动期间入站消息可能丢，属上游 |
 | 归档 `topics` 为空 | 轮换快照里长期话题 0 条 | 可能 `activeTopics` 从未写入，影响长期记忆衔接 |
 | 控制台令牌 | 启动日志"未配置，自动生成"；`/api/socialV2/rotation/preview` 401 | 进程内 token 与 `state/console-token` 不同步 |
@@ -162,7 +166,7 @@ docs/                  # 本文件 + 四份设计/目录文档
 1. 去掉「回复后立刻 `qq_wait_for_messages`」→ 省约 8% 调用，但她不再"等你补充"
 2. 睡前观察 5 分钟 → 2 分钟 → 省 10~12%，但耐心变短
 3. 是否扩大 `inbound/message` 影子（现在只比媒体归一）
-4. 是否接 mod 挂点（`loader` 已就绪，空目录时是空转）
+4. ~~是否接 mod 挂点~~ → **已完成 v1**，后续只剩控制台列表/热开关与自定义工具（v2）
 
 ---
 

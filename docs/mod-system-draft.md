@@ -1,6 +1,7 @@
-# qq-bridge mod 系统设计草案（v1）
+# qq-bridge mod 系统设计（v1）
 
-> 2026-10-29 草案，未实现。目标：**像 Minecraft 装 mod 一样加能力**——丢一个目录、重启即生效，不改 `bridge.js` 一行。
+> 2026-10-29 v1 已实现：`src/mods/loader.js` + `src/mods/host.js`，四个挂点已接入 `bridge.js`；
+> 当前仍需重启生效，控制台列表与热开关留 v2。目标：**像 Minecraft 装 mod 一样加能力**——丢一个目录、重启即生效，不改 `bridge.js` 一行。
 > 与现有模块化的关系：`src/<域>/<模块>` 是**内置零件**（随主体发布、静态 import）；
 > `mods/<id>` 是**外挂**（独立目录、动态加载、可单独开关与卸载）。
 
@@ -10,12 +11,12 @@
 
 | MC 概念 | 本项目对应 | 现状 |
 | --- | --- | --- |
-| `mods/` 目录 | `mods/<mod-id>/` | 无 |
-| `mod.json`（mod 元数据） | 同名清单：id/版本/依赖/入口/挂点 | 无（`spec` 只有模块自述，不参与加载） |
-| Forge / Fabric 事件总线 | 扩展点（见第四节） | 无 |
-| 依赖 `depends` + 加载顺序 | id + 版本区间 + 拓扑排序 | 无 |
-| 模组配置 `config/` | `state/mod-config.json`（按 id 命名空间） | 无 |
-| 启用/禁用模组 | 复用 `module-switch`（`mod:<id>` 为键） | ✅ 已有开关/审计/分级 |
+| `mods/` 目录 | `mods/<mod-id>/` | ✅ 已实现 |
+| `mod.json`（mod 元数据） | 同名清单：id/版本/依赖/入口/挂点 | ✅ 已实现 |
+| Forge / Fabric 事件总线 | 挂点宿主 `src/mods/host.js`（见第四节） | ✅ v1 四挂点 |
+| 依赖 `depends` + 加载顺序 | id + 版本区间 + 拓扑排序 | ✅ loader 已实现 |
+| 模组配置 `config/` | `state/mod-config.json`（按 id 命名空间） | 未实现 |
+| 启用/禁用模组 | 读 `module-switches.json` 的 `mod:<id>`；未记录用清单 `default` | ⚠️ 读已生效，控制台列表/热开关未接 |
 | 资源包（纯数据） | `provide.content`（v2） | 无 |
 | **Coremod / Mixin（改核心）** | **不允许** | 见第二节红线 |
 
@@ -84,12 +85,12 @@ export default {
 
 ## 四、挂点（v1 只开 4 个）
 
-| 挂点 | 时机 | 能做什么 | 不能做什么 |
+| 挂点 | 实际时机 | 能做什么 | 不能做什么 |
 | --- | --- | --- | --- |
-| `inbound.observe` | 消息入库后 | 只读；返回 `{note}` 写审计 | 改文本、拦消息 |
-| `outbound.observe` | 发送结果返回后 | 只读；记录成功/失败 | 重试、改内容 |
-| `wake.before` | 组装唤醒提示时 | 返回 `{append}` 追加一段文本 | 删原文、超预算（超过 200 字截断） |
-| `tick.daily` | 每日重置后 | 做自己的定时任务（单次 ≤ 200ms） | 常驻 `setInterval` |
+| `inbound.observe` | 归一且通过准入后、路由前 | 只读快照；返回 `{note}` 或字符串写审计 | 改文本、拦消息 |
+| `outbound.observe` | 文本发送成功后 / 失败后 | 只读；记录成功/失败（v1 覆盖 `sendToQQ` 与 OneBot HTTP 文本；语音/表情尚未接） | 重试、改内容 |
+| `wake.before` | `buildWakePromptV2` 最终组装时 | 同步返回 `{append}` 追加一段文本 | 删原文、异步、合计超过 200 字 |
+| `tick.daily` | 每日 00:05–02:05 补跑窗口 | 做自己的任务（单次 ≤ 200ms） | 常驻 `setInterval` |
 
 **v2 候选（等 v1 稳定）**
 - `provide.tool`：注册新的 MCP 工具。必须声明 `level`（free/owner/locked）与参数 schema，调用统一走 `ecoGate`——这也是 `tools/registry` 该建的那天
@@ -134,10 +135,15 @@ export default {
 
 ---
 
-## 八、落地顺序（建议）
+## 八、落地状态（2026-10-29）
 
-1. 写 `src/mods/loader.js` + 单测（发现、拓扑排序、缺依赖、apiVersion 拒绝、setup 抛错回滚、挂点白名单）
-2. 中枢加 4 个挂点调用（每处 ≤ 3 行，外层 try/catch）
-3. 用 1 个"示例 mod"验证全链路（建议选纯观测类，如"记录每天的发言数"）
-4. 开关接进 `module-switch`（键 `mod:<id>`），控制台可列出
-5. v2 再做 `provide.tool`（那天顺带建 `tools/registry`）与热加载
+| 项 | 状态 |
+| --- | --- |
+| `src/mods/loader.js` + 单测 | ✅ 发现、拓扑排序、缺依赖、apiVersion、setup 回滚、挂点白名单、`isEnabled` |
+| `src/mods/host.js` + 单测 | ✅ 挂点白名单、异常隔离、payload 冻结、200 字预算、200ms tick 超时、审计 |
+| 中枢 4 个挂点 | ✅ 已接；`mods` 目录缺失/为空时零行为 |
+| 开关 | ⚠️ 已读 `state/module-switches.json` 的 `mod:<id>`，未记录用清单 `default`；控制台不列 mod、不支持热切换 |
+| 示例 mod | 未放进仓库，集成测试用临时 mod 覆盖全链路 |
+| 配置 | `config.json` 的 `mods.enabled / dir / limits`；默认 `mods/` |
+
+v2 再做：控制台列表与热开关、`provide.tool`（顺带 `tools/registry`）、热加载、语音/表情出站观察。
