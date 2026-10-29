@@ -14,7 +14,7 @@
 | --- | --- |
 | 契约里 30 个"需合并"模块 | 15 个接线并上线、8 个判定不接（其中 4 个文件已删）、7 个未动（安全/提示词相关） |
 | 契约 63 个域模块 | 全部有处置结论，无"待接线"项 |
-| 单测 | 632 条（新式）+ `scripts/test-*.mjs` 老脚本全绿 |
+| 单测 | 633 条（新式）+ `scripts/test-*.mjs` 老脚本全绿 |
 | 桥接体积 | 删掉约 2.3k 行内联实现，`bridge.js` 只剩 IO 与能力注入 |
 
 **落地顺序**：`persist/atomic` + `obs/log`（地基）→ 纯函数批（length / outbound-content / health / tool-log / batch / recheck / migrations / heal-token / segments）→ 调度批（wake / chain）→ 会话批（判定不接）→ `outbound/send`（单行化 + 超长拆分）→ 影子批（`session/router`、`inbound/message`）。
@@ -94,7 +94,7 @@ D.2 里已删文件的 4 个（`session/store`、`session/social-state`、`sessi
 | 两套日志路径 | `/root/dsh-run/bridge.log`（systemd stdout）与 `/opt/qq-bridge/state/bridge.log`（桥自带轮转）。查日志时注意区分 |
 | SnowLuma 自报静默 | Hook 在 105 秒无报文即 `good=false`，多为空闲误报；桥接已改为连续 10 分钟才告警，短抖动只记 `suspect`，不自动重启 |
 | 控制台令牌 | 启动日志显示"未配置，自动生成"；`/api/socialV2/rotation/preview` 401 是进程内 token 与 state 文件不同步 |
-| 归档 `topics` 为空 | 轮换快照里长期话题为 0 条，可能 `activeTopics` 从未写入；影响长期记忆衔接 |
+| 归档 `topics` 为空 | **已核查**：主人会话近 2 天 `qq_memory_append` 为 0 次，属模型行为（近期多为闲聊，没有可记的进行中话题），不是轮换丢数据；`activeTopics` 跨轮换保留，回注仍有最近 6 条发言兜底。已修掉回注重复注入关系线/记忆块 |
 | OCR「服务忙」 | OneBot 上游返回 code=200，桥已重试 3 次 |
 | `slang` session not-found | 曾出现一次，需确认是否 DSH 重启导致 `slang-session.json` 失效 |
 

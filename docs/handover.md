@@ -28,7 +28,7 @@ QQ 客户端 ⇄ SnowLuma（ws://127.0.0.1:3001） ⇄ 桥接 bridge.js（:3100 
 | --- | --- |
 | 仓库 | `E:\DSH\qq-bridge`（git，主分支 `main`） |
 | Node | `C:\Users\18439\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe` |
-| 单测 | `node --test tests/*.test.mjs`（当前 **632 通过**） |
+| 单测 | `node --test tests/*.test.mjs`（当前 **633 通过**） |
 | 老脚本测试 | `node scripts/test-voice.mjs` 等（另一套，见 3.3） |
 
 ### 2.2 远端服务器
@@ -87,7 +87,7 @@ ssh root@175.178.200.118 "rm -rf /opt/qq-bridge/src && cp -a /opt/qq-bridge/src.
 
 | 体系 | 位置 | 说明 |
 | --- | --- | --- |
-| 新式（主） | `tests/*.test.mjs` | 632 条，`node --test` 一把跑完 |
+| 新式（主） | `tests/*.test.mjs` | 633 条，`node --test` 一把跑完 |
 | 老式（保留） | `scripts/test-*.mjs` | 把 `bridge.js` 源码塞进 vm eval，跑真实链路桩。**不要删**，`package.json` 的 `test:*` 入口依赖它们 |
 
 老式体系的坑：抽模块后沙箱里没有那些函数。`scripts/audit-bridge-harness.mjs` 已改为**按 bridge.js 的 import 语句自动注入**，新增模块无需改脚手架；注入后再强制覆盖回 `NodeApiClient` 测试桩，避免沙箱访问真实 DSH。
@@ -139,7 +139,7 @@ docs/                  # 本文件 + 四份设计/目录文档
 | --- | --- |
 | 线上版本 | 2026-10-29 12:37:29 起，`active` |
 | 本地/远端 src | 94 / 94 文件，md5 完全一致 |
-| 测试 | 632 通过；router 33 条；`test-voice` 83/0 |
+| 测试 | 633 通过；router 33 条；`test-voice` 83/0 |
 | 模块 | 契约 63 个全部有处置：15 上线、8 判定不接（4 已删）、其余早已在跑；**无待接线** |
 | mod 系统 | v1 已上线：`mods/loader + mods/host`，挂点 `inbound.observe / outbound.observe / wake.before / tick.daily`；无 mod 时零行为 |
 | 影子 | `session/router`、`inbound/message`、`scheduler/triggers` 均在跑，**分歧 0** |
@@ -154,7 +154,7 @@ docs/                  # 本文件 + 四份设计/目录文档
 | --- | --- | --- |
 | 轮换的 idle 闸时序 | **已修复**：用户消息触发的唤醒沿链使用入库前 `lastIncomingAt` | 由 `tests/bridge-rotation-idle.test.mjs` 锁定；主动唤醒仍读当前值 |
 | SnowLuma 自报静默 | 其 Hook 在 105 秒无 QQ 报文时即报 `good=false`；桥接已去抖：连续 **10 分钟**才告警，短抖动仅记 `suspect` | 不要自动重启：绝大多数是空闲误报，下一报文到达即恢复；真故障看持续 >10 分钟 |
-| 归档 `topics` 为空 | 轮换快照里长期话题 0 条 | 可能 `activeTopics` 从未写入，影响长期记忆衔接 |
+| 归档 `topics` 为空 | 轮换快照里长期话题 0 条 | **已核查**：主人会话近 2 天 `qq_memory_append` 调用 0 次，属模型没写，不是轮换丢数据；`activeTopics` 本身跨轮换保留，回注也仍带最近 6 条发言。顺带修掉回注重复注入关系线/记忆块的问题 |
 | 控制台令牌 | 启动日志"未配置，自动生成"；`/api/socialV2/rotation/preview` 401 | 进程内 token 与 `state/console-token` 不同步 |
 | OCR 服务忙 | OneBot 返回 `code=200 msg=服务忙` | 桥已重试 3 次 |
 | 双日志路径 | 见 2.3 | 排查时容易看错文件 |

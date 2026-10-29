@@ -95,20 +95,30 @@ export function buildArchiveSnapshot({
  * @pure 渲染「上一次会话的记忆」回注文本。
  * 没有可注入内容时返回空串（调用方据此决定是否标记已注入）。
  *
+ * 为什么默认只回注 recent：
+ * `memoryText`（轻量记忆）与 `relationText`（关系线）都存在按会话持久化的 social 状态里，
+ * 轮换不会清掉，下一次唤醒的常规段（群聊摘要 / relation）会原样再注入一遍。
+ * 归档若也带这两段，同一条 prompt 里就会出现两份「你和 TA 的关系线」——实测线上确实如此，
+ * 既浪费预算也干扰模型。真正会随会话退役而丢失的只有 recent 发言，所以默认只回注它。
+ *
  * @param {object} snapshot buildArchiveSnapshot 的返回值
  * @param {object} [opts]
  * @param {number} [opts.recallLimit] 回注最近几条发言，缺省 6
+ * @param {boolean} [opts.includeMemory] 是否附带归档时的轻量记忆块（默认 false，见上）
+ * @param {boolean} [opts.includeRelation] 是否附带归档时的关系线（默认 false，见上）
  * @returns {string}
  */
-export function buildRecallText(snapshot, { recallLimit } = {}) {
+export function buildRecallText(snapshot, { recallLimit, includeMemory = false, includeRelation = false } = {}) {
   if (!snapshot || typeof snapshot !== 'object') return '';
   const limit = Number.isFinite(recallLimit) && recallLimit > 0
     ? Math.round(recallLimit)
     : DEFAULTS.recallLimit;
 
   const lines = [];
-  const memoryText = String(snapshot.memoryText ?? '').trim();
-  if (memoryText) lines.push(memoryText);
+  if (includeMemory) {
+    const memoryText = String(snapshot.memoryText ?? '').trim();
+    if (memoryText) lines.push(memoryText);
+  }
 
   const recent = Array.isArray(snapshot.recent) ? snapshot.recent.slice(-limit) : [];
   if (recent.length) {
@@ -120,8 +130,10 @@ export function buildRecallText(snapshot, { recallLimit } = {}) {
     }
   }
 
-  const relationText = String(snapshot.relationText ?? '').trim();
-  if (relationText) lines.push(relationText);
+  if (includeRelation) {
+    const relationText = String(snapshot.relationText ?? '').trim();
+    if (relationText) lines.push(relationText);
+  }
 
   if (!lines.length) return '';
   return `【上一次会话的记忆（自动归档，仅供参考）】\n${lines.join('\n')}\n\n`;
@@ -137,6 +149,15 @@ export function buildRecallText(snapshot, { recallLimit } = {}) {
 export function handle(_ctx, args) {
   const action = args?.action ?? 'snapshot';
   if (action === 'snapshot') return { ok: true, value: buildArchiveSnapshot(args) };
-  if (action === 'recall') return { ok: true, value: buildRecallText(args?.snapshot, { recallLimit: args?.recallLimit }) };
+  if (action === 'recall') {
+    return {
+      ok: true,
+      value: buildRecallText(args?.snapshot, {
+        recallLimit: args?.recallLimit,
+        includeMemory: args?.includeMemory === true,
+        includeRelation: args?.includeRelation === true
+      })
+    };
+  }
   return { ok: false, code: 'INVALID_ARGS', error: `未知动作：${String(action)}（只支持 snapshot / recall）` };
 }

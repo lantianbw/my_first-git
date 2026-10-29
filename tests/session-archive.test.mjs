@@ -74,7 +74,7 @@ test('快照：limits 控制条数与字数', () => {
   assert.equal(snap.topics[0].text.length, 1);
 });
 
-test('回注：记忆 + 最近发言 + 关系线齐全，自己标「你」', () => {
+test('回注：默认只带最近发言，不重复记忆与关系线', () => {
   const text = buildRecallText({
     memoryText: '【进行中的话题】\n- 搬家',
     recent: [
@@ -85,13 +85,24 @@ test('回注：记忆 + 最近发言 + 关系线齐全，自己标「你」', ()
     relationText: '关系：老爹'
   });
   assert.match(text, /^【上一次会话的记忆（自动归档，仅供参考）】/);
-  assert.match(text, /【进行中的话题】/);
   assert.match(text, /最近说过的话：/);
   assert.match(text, /- 你：别再熬夜了/);
   assert.match(text, /- 老爹：好/);
   assert.match(text, /- 对方：在干嘛/, 'who 为空时回退「对方」');
-  assert.match(text, /关系：老爹/);
+  // 这两段在轮换后仍从持久化状态实时注入；归档再带一份会让同一 prompt 出现两份。
+  assert.doesNotMatch(text, /【进行中的话题】/);
+  assert.doesNotMatch(text, /关系：老爹/);
   assert.ok(text.endsWith('\n\n'), '以两个换行结尾，便于拼接进提示词');
+});
+
+test('回注：显式 includeMemory / includeRelation 时带归档原文（导出/排查用）', () => {
+  const text = buildRecallText(
+    { memoryText: 'M', recent: [{ text: 'hi' }], relationText: 'R' },
+    { includeMemory: true, includeRelation: true }
+  );
+  assert.match(text, /^M$/m);
+  assert.match(text, /^R$/m);
+  assert.match(text, /- 对方：hi/);
 });
 
 test('回注：空快照返回空串（调用方据此决定不标记已注入）', () => {
