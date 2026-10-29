@@ -130,7 +130,7 @@ import { isAllowed } from './auth/allow.js';
 import { judgeHealth } from './observability/health.js';
 import { summarize as summarizeActivity } from './observability/activity.js';
 import { createCappedLogger, formatLine, localClock as localClockImpl } from './obs/log.js';
-import { singleLineForQQ as singleLineForQQImpl } from './outbound/send.js';
+import { singleLineForQQ as singleLineForQQImpl, splitLongSegment as splitLongSegmentImpl } from './outbound/send.js';
 import { computeGaps, clampGap } from './outbound/batch.js';
 import { shouldBlockSilentReply as shouldBlockSilentReplyImpl, shouldAuditKey as shouldAuditKeyImpl } from './outbound/recheck.js';
 import { redactSensitive as redactSensitiveArgs, sanitizeToolArgs as sanitizeToolArgsImpl, prepareToolLogEntry, prepareFeedbackEntry } from './obs/tool-log.js';
@@ -9349,83 +9349,10 @@ async function main() {
     return singleLineForQQImpl(s);
   }
 
-  // 超长段落：先按次要标点拆，再按字符硬拆，保证不丢内容、不退回单条长消息。
-  // URL 会被当作不可拆分的原子，避免把 https://... 这种整条网页地址拆断。
+  // 超长拆分规则整段搬进 src/outbound/send.js（URL 占位符保护 + 代理对不切断都在那边）。
+  // 老测试 scripts/test-voice.mjs 已改为直接 import 该模块，不再 eval 中枢源码。
   function splitLongSegment(segment, max) {
-    const s = String(segment ?? '').trim();
-    if (!s) return [];
-    const safeMax = Number.isFinite(max) && max >= 1 ? Math.floor(max) : 500;
-    if (s.length <= safeMax) return [s];
-
-    const urlRe = /https?:\/\/[^\s，。；、]+/g;
-    const urls = [];
-    const masked = s.replace(urlRe, (m) => {
-      urls.push(m);
-      return `\u0000URL${urls.length - 1}\u0000`;
-    });
-
-    const raw = masked.split(/([，、；：,;:])/);
-    const tokens = [];
-    for (let i = 0; i < raw.length; i += 2) {
-      tokens.push(((raw[i] ?? '') + (raw[i + 1] ?? '')).trim());
-    }
-    const out = [];
-    let cur = '';
-    // ⚠️ 占位符 \u0000URL<n>\u0000 必须是**不可切开的最小单位**。
-    // 早先的实现对超长 token 直接按 safeMax 硬切，会把占位符拦腰截断
-    // （如 "\u0000UR" + "L0\u0000"），后面的还原正则 \u0000URL(\d+)\u0000 就匹配不上 →
-    // **URL 整条丢失 + 裸 NUL + 字面量 "URL0" 被发进 QQ 消息**（实测 13 个偏移里 5 个损坏）。
-    // 这里改成按占位符边界切分，宁可某段略超 max 也绝不切碎占位符。
-    const PLACEHOLDER_ANY = /\u0000URL\d+\u0000/;
-    const PLACEHOLDER_ALL = /\u0000URL\d+\u0000/g;
-    /** 把 token 切成 {text, isPlaceholder} 序列（占位符整体一块，绝不拆） */
-    const splitByPlaceholder = (tok) => {
-      const parts = [];
-      let last = 0;
-      let m;
-      PLACEHOLDER_ALL.lastIndex = 0;
-      while ((m = PLACEHOLDER_ALL.exec(tok)) !== null) {
-        if (m.index > last) parts.push({ text: tok.slice(last, m.index), isPlaceholder: false });
-        parts.push({ text: m[0], isPlaceholder: true });
-        last = m.index + m[0].length;
-      }
-      if (last < tok.length) parts.push({ text: tok.slice(last), isPlaceholder: false });
-      return parts;
-    };
-    for (const tok of tokens) {
-      if (!tok) continue;
-      if (tok.length > safeMax) {
-        if (cur) { out.push(cur); cur = ''; }
-        for (const piece of splitByPlaceholder(tok)) {
-          // 占位符整块输出；普通文本仍按 safeMax 切
-          if (piece.isPlaceholder) { out.push(piece.text); continue; }
-          for (let i = 0; i < piece.text.length;) {
-            let end = Math.min(i + safeMax, piece.text.length);
-            // 绝不在代理对（emoji、部分生僻字）中间下刀：硬切会产生「半个 emoji」，
-            // 两个孤立代理各自成为一条 QQ 消息、永远无法再拼回，群友看到的就是乱码方块。
-            // 退一格把整个字符让给下一段；若退成空串就不退（safeMax 极小时），
-            // 宁可硬切也要保证循环一定前进。逻辑内联在此，函数保持自包含
-            // —— test-voice.mjs 会把这个函数的源码单独 eval 出来测。
-            if (end < piece.text.length && end - i > 1) {
-              const last = piece.text.charCodeAt(end - 1);
-              if (last >= 0xd800 && last <= 0xdbff) end -= 1;
-            }
-            out.push(piece.text.slice(i, end));
-            i += end > i ? end - i : safeMax;
-          }
-        }
-      } else if (cur.length + tok.length <= safeMax) {
-        cur += tok;
-      } else {
-        out.push(cur);
-        cur = tok;
-      }
-    }
-    if (cur) out.push(cur);
-
-    return out
-      .map((chunk) => chunk.replace(/\u0000URL(\d+)\u0000/g, (_, i) => urls[Number(i)] ?? ''))
-      .filter(Boolean);
+    return splitLongSegmentImpl(segment, max);
   }
 
   // 判断字符是否属于“中文汉字”范围，用于识别空格分句意图。

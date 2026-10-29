@@ -272,13 +272,12 @@ console.log('## 回归：长消息里的 URL 不许被切碎（P1，曾静默丢
   // 由来：splitLongSegment 用 \u0000URL<n>\u0000 占位符保护 URL，但对超长片段直接按
   // max 硬切，会拦腰切断占位符 → 还原正则失配 → URL 整条消失 + 裸 NUL + 字面量 "URL0"
   // 被发进 QQ 消息。这里把函数从 bridge.js 抽出来，对 1..max+20 所有长度做校验。
-  const src = fs.readFileSync(path.join(ROOT, 'src', 'bridge.js'), 'utf8');
-  const at = src.indexOf('function splitLongSegment');
-  ok(at > 0, '在 bridge.js 里找到 splitLongSegment');
-  if (at > 0) {
-    const endMarker = src.indexOf('\n  }', src.indexOf('return out', at));
-    const fnSrc = src.slice(at, endMarker + 4);
-    const splitLongSegment = eval(`(${fnSrc})`);   // eslint-disable-line no-eval
+  // splitLongSegment 已抽到 src/outbound/send.js：改为直接 import 模块，
+  // 不再从 bridge.js 里 eval 源码（那样会让「抽模块」永远卡住这个函数）。
+  const modPath = path.join(ROOT, 'src', 'outbound', 'send.js').replace(/\\/g, '/');
+  const { splitLongSegment } = await import(`file:///${modPath}`);
+  ok(typeof splitLongSegment === 'function', '从 src/outbound/send.js 取到 splitLongSegment');
+  {
     const url = 'https://example.com/very/long/path?q=1&x=2';
     const max = 500;
     let broken = 0;
