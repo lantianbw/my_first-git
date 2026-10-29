@@ -117,7 +117,7 @@ git worktree add ../qq-bridge-m2 -b mod/m2-preset-boundaries
 
 | 模块 | 工作区 | 分支 | 状态 |
 | --- | --- | --- | --- |
-| M7 | `E:\DSH\qq-bridge-m7` | `mod/m7-voice-clone` | 待开工 |
+| M7 | `E:\DSH\qq-bridge-m7` | `mod/m7-voice-clone` | 已完成（ef82a5d，新音色已上线） |
 | M8 | `E:\DSH\qq-bridge-m8` | `mod/m8-affection` | 待开工 |
 | M9 | `E:\DSH\qq-bridge-m9` | `mod/m9-think-debounce` | 待开工 |
 | M10 | `E:\DSH\qq-bridge-m10` | `mod/m10-profile-probe` | 待开工 |
@@ -371,7 +371,7 @@ git worktree add ../qq-bridge-m2 -b mod/m2-preset-boundaries
 | M4 | 已完成 | mod/m4-mention-gate | e148c5d | 692 全绿、已合并 | 18:59 随 M3 上线 |
 | M5 | 已完成 | mod/m5-ops-metrics | 841b51c | 三行指标已出 | 24h 观察待补 |
 | M6 | 已完成 | mod/m6-preset-contract | b0b1b76 | 契约 7/7 转绿 | 已合并 main，无需部署 |
-| M7 | 待开工 | mod/m7-voice-clone | — | — | 音色换声，独立泳道 |
+| M7 | 已完成 | mod/m7-voice-clone | ef82a5d | 新音色已上线 | 21:53 换 voiceId 上线 |
 | M8 | 已完成 | mod/m8-affection | 813f52f | 711 全绿、已合并 | 21:50 主理人代劳收尾 |
 | M9 | 已完成 | mod/m9-think-debounce | 7207c00 | 699 全绿、已合并 | 21:47 合并 main |
 | M10 | 已完成 | mod/m10-profile-probe | 24dfece | 脚本就绪、已合并 | 21:47 合并 main |

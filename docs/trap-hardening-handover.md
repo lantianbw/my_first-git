@@ -67,6 +67,7 @@
 | 17:22–17:24 | 第四次发布：合并 M1 `ab6542a` / M2 `a2573b3` / M5 `841b51c` → `deploy.ps1`（M1 src）+ scp patch（M2）+ 重启 `dsh-web`（M5 纯脚本无需上线） | 全绿 672；备份 `src.bak-172224`、patch 备份 `qq-chat-v2.patch.yml.bak-1723`；部署锁 `.deploy-lock` 已释放 |
 | 18:58–18:59 | 第五次发布：合并 M3 `635154b` / M4 `e148c5d` → `deploy.ps1`（M3 `bridge.js`+`memory/risk-profile.js`+`content/memory-render.js`；M4 只改 `bridge.js` 与 tests，tests 不上线） | 全绿 692；备份 `src.bak-185849`；部署锁 `.deploy-lock` 已释放；`qq-bridge` active、NRestarts=0、无错误日志 |
 | 21:50–21:51 | 第六次发布：合并 M8 `813f52f` / M9 `7207c00` / M10 `24dfece` → `deploy.ps1`（M8 `bridge.js`+`memory/affection-profile.js`+`content/memory-render.js`）+ scp patch（M9）+ 重启 `dsh-web`（M10 只读脚本无需上线） | 全绿 711；备份 `src.bak-215008`、patch 备份 `qq-chat-v2.patch.yml.bak-2150`；部署锁已释放；`qq-bridge`/`dsh-web` 均 active、NRestarts=0、无错误 |
+| 21:53 | 第七次发布（M7 音色换声上线）：远端 `config.json` 的 `socialV2.voice.tts.voiceId` 从旧音色换成 M7 复刻的新音色 `cosyvoice-v3.5-plus-m7-1d808330...`，重启 `qq-bridge` | 备份 `config.json.bak-2153`；重启后 active、NRestarts=0；远端 `tts-batch` 实测新音色 4 个语气均正常合成（wav 1.8~2.6s） |
 
 **回滚点（记清楚，别搞错）**
 
