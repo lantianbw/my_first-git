@@ -114,6 +114,8 @@ import { nextInterval } from './scheduler/interval.js';
 import { matchTriggers } from './scheduler/triggers.js';
 import { shouldRotate } from './session/expiry.js';
 import { parseKey } from './session/key.js';
+// session/router 灰度（契约 Q2）：新路由只做影子比对，不改变任何判定结果。
+import { canonicalConversationKey } from './core/session-router.mjs';
 import { buildArchiveSnapshot, buildRecallText } from './session/archive.js';
 import { isDuplicate } from './outbound/dedupe.js';
 import { splitText } from './outbound/split.js';
@@ -1535,9 +1537,32 @@ function allowShadowCompare(kind, id, cfg, allowList, result) {
 // 判定交给 src/session/key.js（9 条单测覆盖）。与原内联实现的唯一行为差异：原版用 Number
 // 转换 + isSafeInteger，超过 2^53 的 id 会被拒；模块按字符串校验 1~20 位，不丢精度。
 // 真实 QQ 号 / 群号都是 10~11 位，两种实现结果相同；差异只存在于不现实的超长数字输入。
+// session/router 影子只对每个 key 比一次：同类 key 的分歧原因相同，重复打日志没有价值。
+const routerShadowChecked = new Set();
+let routerShadowAnnounced = false;
 function canonicalV2Key(key) {
   const parsed = parseKey(key);
-  return parsed.ok ? parsed.key : null;
+  const decided = parsed.ok ? parsed.key : null;
+  // 灰度：新路由的结论只用于比对与记账，返回值仍走现实现（Q2 结论：先接入新代码路径）。
+  const shadowKey = String(key);
+  if (!routerShadowChecked.has(shadowKey)) {
+    routerShadowChecked.add(shadowKey);
+    try {
+      const shadow = canonicalConversationKey(shadowKey);
+      const norm = (v) => (v == null ? null : String(v));
+      if (norm(shadow) !== norm(decided)) {
+        log(`[router] 影子不一致：现实现=${decided} 模块=${shadow}（key=${shadowKey}）`);
+      } else if (!routerShadowAnnounced) {
+        // 全仓第一次比对成功时记一条，证明"新代码路径确实被走到了"——
+        // 否则日志里 0 行分歧时，无法区分"一致"和"根本没跑"。
+        routerShadowAnnounced = true;
+        log(`[router] 影子已接入（首条 key=${shadowKey}，结论=${decided}，与模块一致）`);
+      }
+    } catch (error) {
+      log(`[router] 影子异常：${error?.message ?? error}（key=${shadowKey}）`);
+    }
+  }
+  return decided;
 }
 
 const APPROVE_WORDS = new Set(['通过', '同意', '允许', '批准', 'yes', 'y', 'approve', 'ok']);
