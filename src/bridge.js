@@ -10633,12 +10633,20 @@ async function main() {
       const entityWords = Array.isArray(entitySection.words) && entitySection.words.length
         ? entitySection.words.map(String).filter(Boolean)
         : undefined;
+      // preset 例句（R1）：preset 里的 8 句「她平时会自己冒这种话」原句一律拦。
+      // 与实体词表同样只透传「有没有自定义」，默认表留在模块里。
+      const echoSection = guardSectionV2('presetEcho');
+      const echoLines = Array.isArray(echoSection.lines) && echoSection.lines.length
+        ? echoSection.lines.map(String).filter(Boolean)
+        : undefined;
       const content = evaluateContent({
         text: raw,
         metaEnabled: guardSectionEnabledV2('meta'),
         words,
         entityEnabled: guardSectionEnabledV2('sensitiveEntities'),
         entityWords,
+        presetEchoEnabled: guardSectionEnabledV2('presetEcho'),
+        presetEchoLines: echoLines,
         addressEnabled: guardSectionEnabledV2('address'),
         isOwnerPrivate: key === `private:${String(cfg.ownerQQ ?? '')}`,
         isGroup: key.startsWith('group:')
@@ -10646,6 +10654,7 @@ async function main() {
       if (!content.ok) {
         if (content.kind === 'meta') appendActivity(`[guard] meta-blocked (${key}): ${content.word}`);
         else if (content.kind === 'entity') appendActivity(`[guard] entity-blocked (${key}): ${content.word}`);
+        else if (content.kind === 'presetEcho') appendActivity(`[guard] preset-echo (${key})`);
         else if (content.kind === 'address') appendActivity(`[guard] 饲养员拦截 (${key})`);
         else if (content.kind === 'kinship') {
           appendActivity(`[guard] kinship-blocked (${key}): ${content.word}`);

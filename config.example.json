@@ -121,7 +121,8 @@
     "guard": {
       "meta": { "enabled": true },
       "address": { "enabled": true },
-      "sensitiveEntities": { "enabled": true }
+      "sensitiveEntities": { "enabled": true },
+      "presetEcho": { "enabled": true }
     },
     "provideRecommendations": true,
     "tools": {

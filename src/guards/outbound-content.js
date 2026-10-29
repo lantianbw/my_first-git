@@ -16,6 +16,10 @@
 //    入站侧没有任何异常——只有发送前能看到它真的要发出去。
 //  - `kinship`：非 owner 会话不得输出亲属称呼。挂在 address 分节下，`kinshipEnabled` 可单独关。
 //    两者都不回显命中词到群里；实体命中的 reason 刻意不提原词，避免模型照着再写一遍。
+//  - `presetEcho`（R1）：preset 例句原句一律拦。preset 给了 8 条「她平时会自己冒这种话」，
+//    本意是定调子，实际成了可复读的台词库（2026-10-28 20:48「床以外都是远方」逐字出现）。
+//    「别原句照抄」这条禁令没有检测手段等于没有；这里补上检测，命中让模型用自己的话重写。
+//    判定用去标点/空白的归一化副本做包含比较：带句号、拆成两条、夹在长句里都能命中。
 //
 // 边界：不读 cfg（分节原样传入）、不记日志、不写 activity（只返回 kind/word/reason）、
 // 不发消息、不改状态。判定在归一化副本（NFKC + 小写）上做，返回的 text 始终是原文
@@ -33,7 +37,7 @@
 
 export const spec = Object.freeze({
   name: 'guards/outbound-content',
-  version: '1.2.0', // 新增 sensitiveEntities / kinship：按 semver 记 minor
+  version: '1.3.0', // 新增 presetEcho（preset 例句原句拦截）：按 semver 记 minor
   deps: Object.freeze([]),
   optionalDeps: Object.freeze([]),
   guards: Object.freeze(['outbound.content']),
@@ -73,6 +77,27 @@ export const DEFAULT_SENSITIVE_ENTITIES = Object.freeze([
 export const DEFAULT_KINSHIP_TITLES = Object.freeze([
   '爷爷', '奶奶', '姥爷', '姥姥', '外公', '外婆',
   '爸爸', '妈妈', '干爹', '干妈', '哥哥', '姐姐', '弟弟', '妹妹'
+]);
+
+/**
+ * preset 例句默认黑名单：`dsh/agent-presets/qq-chat-v2/agent.cordis.yml` 的
+ * 【她平时会自己冒这种话】里那 8 句原句。
+ *
+ * 为什么必须拦：该段的原话是「照这个味道说，别原句照抄」，但这句话本身没有检测手段。
+ * 2026-10-28 20:48 群里逐字出现了「床以外都是远方」——提示词自己写了禁令、自己没守住。
+ * AI 味里唯一 100% 可判定、零成本的就是这一类：原句复读。
+ *
+ * 改词走 `socialV2.guard.presetEcho.lines`（整表覆盖，不是追加；空数组/省略 = 用内置表）。
+ */
+export const DEFAULT_PRESET_ECHO_LINES = Object.freeze([
+  '床以外都是远方',
+  '被子外面好危险',
+  '今天的运动量：翻身',
+  '无聊到数藤壶',
+  '好安静，藤壶都长了',
+  '全员装死是吧',
+  '电量百分之五，人也',
+  '追的番突然停更，裂开'
 ]);
 
 /** 只有合法 JS 正则标志才把 `/.../x` 当正则，避免把 `24/7` 这类普通词条误编译。 */
@@ -263,9 +288,37 @@ export function matchKinshipTitle(text, words) {
   return null;
 }
 
+/**
+ * 命中 preset 例句原句时返回命中的那条（供调用方记账），否则 null。
+ * 用「去标点/空白」的副本做包含比较：加句号、拆行、夹在长句里都能命中。
+ * @pure
+ * @param {unknown} text
+ * @param {Array<string|RegExp>} [lines] 词表；非数组/空数组走默认表
+ * @returns {string|null}
+ */
+export function matchPresetEcho(text, lines) {
+  let raw;
+  try {
+    raw = String(text ?? '');
+  } catch {
+    return null;
+  }
+  if (!raw) return null;
+  const compact = compactForEntity(raw);
+  if (!compact) return null;
+  for (const line of resolveWords(lines, DEFAULT_PRESET_ECHO_LINES)) {
+    if (line instanceof RegExp) {
+      if (safeTest(line, raw) || safeTest(line, compact)) return String(line);
+      continue;
+    }
+    const needle = compactForEntity(line);
+    if (needle && compact.includes(needle)) return String(line);
+  }
+  return null;
+}
+
 /** 解析词表：非数组/空数组 → 给定默认表；逐项过滤空串，坏词条跳过（跳过即「无命中」）。 */
-function resolveWords(words, fallback) {
-  if (!Array.isArray(words) || words.length === 0) return fallback;
+function resolveWords(words, fallback) {  if (!Array.isArray(words) || words.length === 0) return fallback;
   const list = [];
   for (const word of words) {
     if (word instanceof RegExp) {
@@ -313,10 +366,12 @@ const messageOf = (error) => {
  * @param {Array<string|RegExp>} [options.entityWords] 敏感人物名词表（显式传入时优先于分节；空数组走默认）
  * @param {boolean}  [options.kinshipEnabled]  亲属称呼开关（显式传入时优先于分节，缺省跟随 address）
  * @param {Array<string|RegExp>} [options.kinshipWords] 亲属称呼词表（缺省走内置表）
+ * @param {boolean}  [options.presetEchoEnabled] preset 例句原句拦截开关（显式传入时优先于分节）
+ * @param {Array<string|RegExp>} [options.presetEchoLines] preset 例句词表（显式传入时优先于分节；空数组走默认）
  * @param {boolean}  [options.isOwnerPrivate=false] 是否 owner 私聊
  * @param {boolean}  [options.isGroup=false]   是否群聊（群友知道她有个爹）
  * @returns {{ok:true, text:string, replaced?:true, degraded?:true, error?:string}
- *          |{ok:false, kind:'entity'|'meta'|'address'|'kinship'|'vocative', reason:string, word?:string}}
+ *          |{ok:false, kind:'entity'|'presetEcho'|'meta'|'address'|'kinship'|'vocative', reason:string, word?:string}}
  */
 export function evaluateContent(options = {}) {
   let raw;
@@ -339,6 +394,9 @@ export function evaluateContent(options = {}) {
       ? guardSectionEnabled(guard, 'sensitiveEntities')
       : Boolean(options.entityEnabled);
     const kinshipOn = options?.kinshipEnabled === undefined ? addressOn : Boolean(options.kinshipEnabled);
+    const echoOn = options?.presetEchoEnabled === undefined
+      ? guardSectionEnabled(guard, 'presetEcho')
+      : Boolean(options.presetEchoEnabled);
     const isOwnerPrivate = options?.isOwnerPrivate === true;
     const isGroup = options?.isGroup === true;
 
@@ -359,9 +417,25 @@ export function evaluateContent(options = {}) {
       }
     }
 
+    // preset 例句原句：排在 meta 之前——它是 100% 可判定的「背台词」，比内部词汇更容易命中，
+    // 而且 reason 同样不带原句，避免把台词再喂回去。
+    if (echoOn && raw) {
+      const lines = options?.presetEchoLines === undefined
+        ? guardSection(guard, 'presetEcho').lines
+        : options.presetEchoLines;
+      const hit = matchPresetEcho(raw, lines);
+      if (hit) {
+        return {
+          ok: false,
+          kind: 'presetEcho',
+          word: hit,
+          reason: 'outbound guard: 这句是预设里的例句，不能原样发——换成你自己的说法，或者这次干脆不说'
+        };
+      }
+    }
+
     if (metaOn) {
-      const words = options?.words === undefined ? guardSection(guard, 'meta').words : options.words;
-      for (const word of resolveMetaWords(words)) {
+      const words = options?.words === undefined ? guardSection(guard, 'meta').words : options.words;      for (const word of resolveMetaWords(words)) {
         if (!matchMetaWord(raw, word)) continue;
         const shown = String(word);
         return {

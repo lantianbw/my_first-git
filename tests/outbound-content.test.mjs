@@ -6,12 +6,14 @@ import {
   matchMetaWord,
   matchSensitiveEntity,
   matchKinshipTitle,
+  matchPresetEcho,
   guardSection,
   guardSectionEnabled,
   spec,
   DEFAULT_META_BLOCK_WORDS,
   DEFAULT_SENSITIVE_ENTITIES,
-  DEFAULT_KINSHIP_TITLES
+  DEFAULT_KINSHIP_TITLES,
+  DEFAULT_PRESET_ECHO_LINES
 } from '../src/guards/outbound-content.js';
 
 // 与 config.json 的 socialV2.guard 同形
@@ -420,11 +422,67 @@ test('fail open：词条自己 toString 抛错时只丢这一条，其余词条�
   assert.equal(v.kind, 'meta');
 });
 
+// ── R1：preset 例句原句 ─────────────────────────────────────────────────────
+
+test('R1：8 句 preset 例句原句全部拦截', () => {
+  assert.equal(DEFAULT_PRESET_ECHO_LINES.length, 8);
+  for (const line of DEFAULT_PRESET_ECHO_LINES) {
+    const v = evaluateContent({ text: line });
+    assert.equal(v.ok, false, `应拦截：${line}`);
+    assert.equal(v.kind, 'presetEcho');
+  }
+});
+
+test('R1：带标点、拆空格、嵌在长句里也能命中', () => {
+  for (const text of ['床以外都是远方。', '床以外 都是远方', '行吧，床以外都是远方，睡', '无聊到 数 藤壶！']) {
+    const v = evaluateContent({ text });
+    assert.equal(v.ok, false, `应拦截：${text}`);
+    assert.equal(v.kind, 'presetEcho');
+  }
+});
+
+test('R1：reason 不带原句（避免把台词喂回去）', () => {
+  const v = evaluateContent({ text: '床以外都是远方' });
+  assert.equal(v.ok, false);
+  assert.equal(v.word, '床以外都是远方');
+  assert.ok(!v.reason.includes('床以外都是远方'));
+});
+
+test('R1：正常句子不误伤（只说「运动量」「藤壶」不算）', () => {
+  for (const text of ['今天的运动量还行', '藤壶是什么梗', '电量还剩百分之五', '这季番停更了？']) {
+    const v = evaluateContent({ text });
+    assert.equal(v.ok, true, `不该拦：${text}`);
+  }
+});
+
+test('R1：owner 私聊同样拦（AI 味不分会话）', () => {
+  const v = evaluateContent({ text: '被子外面好危险', isOwnerPrivate: true });
+  assert.equal(v.ok, false);
+  assert.equal(v.kind, 'presetEcho');
+});
+
+test('R1：自定义 lines 整表覆盖；空数组回落到内置表', () => {
+  const custom = evaluateContent({ text: '床以外都是远方', presetEchoLines: ['临时台词'] });
+  assert.equal(custom.ok, true, '整表覆盖后旧句不再拦');
+  const hit = evaluateContent({ text: '临时台词', presetEchoLines: ['临时台词'] });
+  assert.equal(hit.kind, 'presetEcho');
+  const fallback = evaluateContent({ text: '床以外都是远方', presetEchoLines: [] });
+  assert.equal(fallback.kind, 'presetEcho', '空数组走默认表');
+});
+
+test('R1：分节 enabled=false 时关闭；section lines 生效', () => {
+  const off = evaluateContent({ guard: { presetEcho: { enabled: false } }, text: '床以外都是远方' });
+  assert.equal(off.ok, true);
+  const viaSection = evaluateContent({ guard: { presetEcho: { lines: ['自定义'] } }, text: '自定义' });
+  assert.equal(viaSection.kind, 'presetEcho');
+  assert.equal(matchPresetEcho('没这句'), null);
+});
+
 // ── 契约 ───────────────────────────────────────────────────────────────────
 
 test('spec 与默认词表符合契约', () => {
   assert.equal(spec.name, 'guards/outbound-content');
-  assert.equal(spec.version, '1.2.0');
+  assert.equal(spec.version, '1.3.0');
   assert.deepEqual(spec.deps, []);
   assert.deepEqual(spec.guards, ['outbound.content']);
   assert.equal(spec.toggle.level, 'owner');
