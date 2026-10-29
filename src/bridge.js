@@ -2046,6 +2046,12 @@ async function main() {
       toneMap: (v.toneMap && typeof v.toneMap === 'object' && !Array.isArray(v.toneMap) && Object.keys(v.toneMap).length)
         ? v.toneMap
         : DEFAULT_TONE_MAP,
+      // 语气 → 富语言标签前缀（Qwen-Audio-TTS 的 [excited] / [giggles] 那套）。
+      // 结构同 toneMap，但**默认不启用**：只有 config 显式配了才拼标签，
+      // 因为标签语法只对 Qwen-Audio-TTS 系列有效，换回 cosyvoice 时不能带。
+      toneTags: (v.toneTags && typeof v.toneTags === 'object' && !Array.isArray(v.toneTags) && Object.keys(v.toneTags).length)
+        ? v.toneTags
+        : null,
       tts: {
         ...tts,
         dir: ttsInside ? path.basename(ttsDirRaw) : 'tts',
@@ -2074,6 +2080,7 @@ async function main() {
           cacheTtlMs: vc.tts.cacheTtlMs,
           keepFiles: vc.tts.keepFiles,
           pricePer10kChars: vc.tts.pricePer10kChars,
+          toneTags: vc.toneTags,
           synth: (args) => synthesizeTts({ ...args, apiKey, model: vc.tts.model, voice: vc.tts.voiceId, baseUrl: vc.tts.baseUrl, format: vc.tts.format, sampleRate: vc.tts.sampleRate, timeoutMs: vc.tts.timeoutMs }),
           download: (audioUrl, dest) => downloadAudioFile(audioUrl, dest, { maxBytes: vc.tts.maxBytes, timeoutMs: Math.min(vc.tts.timeoutMs, 60000) })
         }

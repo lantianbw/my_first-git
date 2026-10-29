@@ -316,8 +316,14 @@ console.log('## 接线存在性（bridge / MCP / config）');
   ok(mcp.includes('/api/socialV2/speak'), 'MCP 工具调 /api/socialV2/speak');
 
   ok(cfg.socialV2?.tools?.speak === true, 'config.json 已打开 socialV2.tools.speak');
-  ok(cfg.socialV2?.voice?.tts?.voiceId === 'cosyvoice-v3.5-plus-xluma-722f1767a5d348869159ac284cce7986', 'config 记录复刻音色 voiceId');
-  ok(cfg.socialV2?.voice?.tts?.model === 'cosyvoice-v3.5-plus', 'config 记录目标模型');
+  // 断言「有复刻音色且与模型绑定一致」，而不是钉死某个具体音色——
+  // 换模型（cosyvoice ⇄ qwen-audio-tts ⇄ …）时音色必然要重新复刻，
+  // 钉死具体值会让每次换模型都误报；但「voiceId 必须由该 model 复刻而来」
+  // 是百炼的硬约束（音色绑定 target_model，跨模型会合成失败），必须校验。
+  const ttsCfg = cfg.socialV2?.voice?.tts ?? {};
+  ok(typeof ttsCfg.voiceId === 'string' && ttsCfg.voiceId.length > 0, 'config 记录复刻音色 voiceId');
+  ok(typeof ttsCfg.model === 'string' && ttsCfg.model.length > 0, 'config 记录目标模型');
+  ok(ttsCfg.voiceId.startsWith(ttsCfg.model), 'voiceId 由当前 model 复刻（音色不能跨模型复用）');
   ok(cfg.socialV2?.voice?.toneMap && Object.keys(cfg.socialV2.voice.toneMap).length >= 6, 'config 携带可覆盖 toneMap');
   ok(cfg.socialV2?.voice?.tts?.credentialsFile === '~/.dsh/.credentials.yaml', '凭据走 credentials.yaml 指针');
   ok(!/sk-[A-Za-z0-9]{16,}/.test(cfgText), 'config.json 没有明文 API key');

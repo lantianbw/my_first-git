@@ -55,6 +55,8 @@ const cfg = loadConfig();
 const voiceCfg = cfg.socialV2?.voice ?? {};
 const tts = { ...TTS_DEFAULTS, ...(voiceCfg.tts ?? {}) };
 const toneMap = (voiceCfg.toneMap && Object.keys(voiceCfg.toneMap).length) ? voiceCfg.toneMap : DEFAULT_TONE_MAP;
+// 语气 → 富语言标签前缀（Qwen-Audio-TTS 专用）；config 不配就不加，与以前行为一致。
+const toneTags = (voiceCfg.toneTags && typeof voiceCfg.toneTags === 'object' && Object.keys(voiceCfg.toneTags).length) ? voiceCfg.toneTags : null;
 const voiceDir = path.resolve(ROOT, String(voiceCfg.dir ?? 'audio'));
 const ttsDir = path.resolve(voiceDir, tts.dir || 'tts');
 const indexFile = path.join(ttsDir, 'index.json');
@@ -143,6 +145,7 @@ const ensure = (plan, fileName) => ensureTtsAudio(
     cacheTtlMs: tts.cacheTtlMs,
     keepFiles: tts.keepFiles,
     pricePer10kChars: tts.pricePer10kChars,
+    toneTags,
     synth: (a) => synthesizeTts({ ...a, apiKey, model: tts.model, voice: tts.voiceId, baseUrl: tts.baseUrl, format: tts.format, sampleRate: tts.sampleRate, timeoutMs: tts.timeoutMs }),
     download: (audioUrl, dest) => downloadAudioFile(audioUrl, dest, { maxBytes: tts.maxBytes, timeoutMs: Math.min(tts.timeoutMs, 60000) })
   }

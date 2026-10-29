@@ -50,7 +50,30 @@ export const DEFAULT_TONE_MAP = Object.freeze({
   '生气/恼/火大/气死/气人': '语速快，音量抬高，语气冲一点',
   '困/深夜/想睡/犯困/瞌睡': '含糊一点，尾音拖长，语速放慢，像快睡着了',
   '软/温柔/撒娇/软下来': '声音放软，轻声说，温柔一点',
-  '默认/自然': '自然地说'
+  // 顺序必须是「自然」在前：resolveToneInstruction 用 `hit.primary !== '默认'` 判断
+  // 是否走映射，主名若是「默认」，tone='自然' 会被判成"未命中映射"而原样透传，
+  // 真正发给 TTS 的指令就变成「自然」两个字。别改回 '默认/自然'。
+  '自然/默认': '自然地说'
+});
+
+/**
+ * 语气 → 富语言标签前缀（config 的 socialV2.voice.toneTags 可整体覆盖；不配则不启用）。
+ * 语法来自百炼 Qwen-Audio-TTS：控制类标签（如 [excited]）作用到下一个标签为止，
+ * 拟声类标签（如 [giggles]）在当前位置插入声音、不改变前后情绪。
+ *
+ * 为什么用标签而不是只调 instruction：实测同句 22 字，[excited][very fast] 把
+ * 音高起伏（5-95% 半音跨度）从 11.71st 拉到 14.11st（+20.5%），而 instruction
+ * 只能改整体音高和语速，改不动句调抑扬。标签必须写在 text 里，instruction 里无效，
+ * 所以只能在合成前拼到文本前。
+ */
+export const DEFAULT_TONE_TAGS = Object.freeze({
+  '松快/轻快/开心/高兴/心情好/得劲': '[excited][very fast]',
+  '闷/低落/难过/难受/烦/没劲/没意思': '[tired][very slowly]',
+  '逗/好笑/被逗到/想笑/乐/搞笑': '[mischievously][very fast][giggles]',
+  '生气/恼/火大/气死/气人': '[angry][shouting]',
+  '困/深夜/想睡/犯困/瞌睡': '[tired]',
+  '软/温柔/撒娇/软下来': '[whispers]',
+  '自然/默认': '[excited][very fast]'
 });
 
 // ── 基础工具 ────────────────────────────────────────────────────────────────
@@ -200,7 +223,7 @@ export function isDeepNight(hour) {
  *      （instruction 字段本来就支持自然语言语气控制；仅做长度校验）。
  *   2. 当前心情词（moods.json 的 dynamicMood/baseMood.word）。
  *   3. 深夜时段 → 「困」组。
- *   4. 默认组（'默认/自然'；自定义 toneMap 漏配时退回 '自然地说'）。
+ *   4. 默认组（'自然/默认'；自定义 toneMap 漏配时退回 '自然地说'）。
  * 返回 { toneKey, instruction, via }；tone 非法（透传超长）时抛错。
  */
 export function resolveToneInstruction({ tone = null, moodWord = null, hour = null, toneMap = DEFAULT_TONE_MAP } = {}) {
@@ -228,6 +251,20 @@ export function resolveToneInstruction({ tone = null, moodWord = null, hour = nu
     instruction: fallback?.instruction ?? '自然地说',
     via: 'default'
   };
+}
+
+/**
+ * 按 toneKey 取标签前缀。toneTags 结构与 toneMap 完全相同（别名组 → 值），
+ * 因此复用 matchToneGroup 的匹配规则：显式语气、心情词、深夜兜底都能命中。
+ * 未命中或值不是合法标签时返回空串（宁可不加，也不要把普通文字念出来）。
+ */
+export function resolveToneTag(toneKey, toneTags = DEFAULT_TONE_TAGS) {
+  const w = String(toneKey ?? '').trim();
+  if (!w || !toneTags || typeof toneTags !== 'object' || Array.isArray(toneTags)) return '';
+  const hit = matchToneGroup(w, toneTags);
+  const tag = String(hit?.instruction ?? '').trim();
+  // 只接受「一个或多个 [xxx] 连续拼接」，挡住把中文描述误配进 toneTags 的情况
+  return /^(?:\[[^[\]]+\])+$/.test(tag) ? tag : '';
 }
 
 // ── 合成与下载 ──────────────────────────────────────────────────────────────
@@ -417,7 +454,12 @@ const inflightEnsures = new Map();
 /**
  * 「确保有这条音频」：命中缓存直接复用；否则合成 + 下载 + 记索引 + 触发清理。
  * 这是 qq_speak 与 tts-batch 共用的落盘核心。synth/download 可注入（单测用假 TTS）。
- * 返回 { file（basename）, cached, chars, costYuan, durationSec, bytes, createdAt, instruction, text }。
+ *
+ * ctx.toneTags：语气 → 富语言标签前缀（config 的 socialV2.voice.toneTags）。
+ *   给了就把标签拼到**发给 TTS 的文本**前；用户可见文本、字数、索引 text 仍是原文。
+ *   不传（默认 null）= 不启用，行为与加这个功能之前完全一致。
+ *
+ * 返回 { file（basename）, cached, chars, costYuan, durationSec, bytes, createdAt, instruction, tag, text }。
  */
 export async function ensureTtsAudio({ text, instruction, toneKey, fileName = null }, ctx) {
   const {
@@ -426,13 +468,18 @@ export async function ensureTtsAudio({ text, instruction, toneKey, fileName = nu
     cacheTtlMs = TTS_DEFAULTS.cacheTtlMs,
     keepFiles = TTS_DEFAULTS.keepFiles,
     pricePer10kChars = TTS_DEFAULTS.pricePer10kChars,
+    toneTags = null,
     synth,
     download,
     now = Date.now
   } = ctx;
   const cleanText = String(text ?? '').trim();
   const cleanIns = String(instruction ?? '').trim();
-  const cacheKey = ttsCacheKey(cleanText, cleanIns);
+  // 富语言标签只拼在「发给 TTS 的文本」上：用户可见文本、字数、索引 text 仍是 cleanText。
+  // 缓存键用 spokenText —— 改了 toneTags 就自然失效旧缓存，不会继续播上一个配置的声音。
+  const tagPrefix = toneTags ? resolveToneTag(toneKey, toneTags) : '';
+  const spokenText = tagPrefix ? `${tagPrefix}${cleanText}` : cleanText;
+  const cacheKey = ttsCacheKey(spokenText, cleanIns);
   const chars = countChars(cleanText);
 
   // 并发去重：同一 (text+instruction) 正在合成时，后来的等它，直接复用结果。
@@ -441,18 +488,19 @@ export async function ensureTtsAudio({ text, instruction, toneKey, fileName = nu
 
   const task = (async () => {
     const index = loadTtsIndex(indexFile, ttsDir);
-    const hit = findCachedEntry(index, { text: cleanText, instruction: cleanIns, cacheTtlMs, now: now() });
+    const hit = findCachedEntry(index, { text: spokenText, instruction: cleanIns, cacheTtlMs, now: now() });
     if (hit) return { ...hit, cached: true };
 
     // fileName 可注入（批量脚本用 <语气>-<序号>-<短语前6字>.wav；运行时默认 时间戳-hash）。
     const wantName = fileName ? path.basename(String(fileName)) : runtimeTtsFileName(cleanText, cleanIns, now());
     const dest = uniquePath(ttsDir, wantName);
-    const { audioUrl, requestId } = await synth({ text: cleanText, instruction: cleanIns });
+    const { audioUrl, requestId } = await synth({ text: spokenText, instruction: cleanIns });
     const { bytes } = await download(audioUrl, dest);
     const info = wavInfoFromBuffer(fs.readFileSync(dest));
     const entry = {
       text: cleanText,
       tone: toneKey ?? '',
+      tag: tagPrefix || null,
       instruction: cleanIns,
       cacheKey,
       file: path.basename(dest),
