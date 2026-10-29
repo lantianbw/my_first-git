@@ -33,6 +33,29 @@ function minutesAgo(now, at) {
 }
 
 /**
+ * @pure 把一条印象的风险档案（risk.trapHappy / noGoTopics / refusedTitles）拼成印象行末尾的说明。
+ * 没有风险信息返回空串；只有旧字段 noKinshipTitle 时退回旧文案，保证老数据渲染不变。
+ */
+function renderRiskNotes(im) {
+  const risk = im && im.risk && typeof im.risk === 'object' ? im.risk : {};
+  const notes = [];
+  if (risk.trapHappy === true) notes.push('爱下套');
+  const noGoTopics = Array.isArray(risk.noGoTopics)
+    ? risk.noGoTopics.filter((t) => typeof t === 'string' && t.trim())
+    : [];
+  if (noGoTopics.length) notes.push(`不能接的话题：${noGoTopics.join('、')}`);
+  const refusedTitles = Array.isArray(risk.refusedTitles)
+    ? risk.refusedTitles.filter((t) => typeof t === 'string' && t.trim())
+    : [];
+  if (refusedTitles.length) {
+    notes.push(`已拒绝的称呼：${refusedTitles.join('、')}`);
+  } else if (im && im.noKinshipTitle === true) {
+    notes.push('边界：不叫亲属称呼，用名字或「你」');
+  }
+  return notes.length ? `（${notes.join('；')}）` : '';
+}
+
+/**
  * @pure 渲染会话级记忆块。
  *
  * @param {object} st   会话状态（activeTopics / pendingThoughts / memberImpressions）
@@ -79,8 +102,17 @@ export function renderMemory(st, { now, limits } = {}) {
   }
 
   // 3) 对群友的印象：取最后 N 个名字，没有 traits 时给「暂无记录」而不是留空。
-  //    带 noKinshipTitle 的加一句边界说明——这人要过「爷爷」这类称呼且已被拒，
-  //    不写出来模型下次会重新谈判（2026-10-26~28 就是这么一步步松口的）。
+  //    风险档案（risk.trapHappy / risk.noGoTopics / risk.refusedTitles）追加到印象行末尾，
+  //    让模型下次唤醒直接看到「此人爱下套 / 哪些话题不能接 / 哪些称呼已拒绝」，不用重新谈判。
+  //    没有 risk.refusedTitles 的老数据退回 noKinshipTitle 的旧文案（兼容 2026-10-29 前落盘的档案）。
+  //
+  //    —— 10 条上限（impressionLimit，默认 10）说明 ——
+  //    注入窗口只有几百字，三类记忆都要挤进去，所以印象只取「最后 N 个名字」。
+  //    Object.keys 对字符串键按插入顺序返回，slice(-N) 拿到的是最后写入的 N 个人，
+  //    而不是「互动最频繁」或「最近互动」的 N 个人；超过 N 人时最早写入的印象会被挤出。
+  //    代价是：被标记边界（如拒称呼）的人若不在最近 N 个里，唤醒提示里就看不到这条边界，
+  //    人数多的群尤其要注意（见 docs/trap-hardening-handover.md §7-7）。这是有意的取
+  //    舍——宁可少渲染，也不无限撑大提示词。
   const impressions = st.memberImpressions && typeof st.memberImpressions === 'object' ? st.memberImpressions : {};
   const names = Object.keys(impressions);
   if (names.length) {
@@ -89,7 +121,7 @@ export function renderMemory(st, { now, limits } = {}) {
       const im = impressions[name] || {};
       const traits = Array.isArray(im.traits) ? im.traits : [];
       const count = Number(im.interactionCount) || 0;
-      const boundary = im.noKinshipTitle === true ? '（边界：不叫亲属称呼，用名字或「你」）' : '';
+      const boundary = renderRiskNotes(im);
       lines.push(`- ${name}：${traits.length ? traits.join('、') : '暂无记录'}（互动 ${count} 次）${boundary}`);
     }
   }
