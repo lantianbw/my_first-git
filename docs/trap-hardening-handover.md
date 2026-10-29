@@ -68,12 +68,15 @@
 | 18:58–18:59 | 第五次发布：合并 M3 `635154b` / M4 `e148c5d` → `deploy.ps1`（M3 `bridge.js`+`memory/risk-profile.js`+`content/memory-render.js`；M4 只改 `bridge.js` 与 tests，tests 不上线） | 全绿 692；备份 `src.bak-185849`；部署锁 `.deploy-lock` 已释放；`qq-bridge` active、NRestarts=0、无错误日志 |
 | 21:50–21:51 | 第六次发布：合并 M8 `813f52f` / M9 `7207c00` / M10 `24dfece` → `deploy.ps1`（M8 `bridge.js`+`memory/affection-profile.js`+`content/memory-render.js`）+ scp patch（M9）+ 重启 `dsh-web`（M10 只读脚本无需上线） | 全绿 711；备份 `src.bak-215008`、patch 备份 `qq-chat-v2.patch.yml.bak-2150`；部署锁已释放；`qq-bridge`/`dsh-web` 均 active、NRestarts=0、无错误 |
 | 21:53 | 第七次发布（M7 音色换声上线）：远端 `config.json` 的 `socialV2.voice.tts.voiceId` 从旧音色换成 M7 复刻的新音色 `cosyvoice-v3.5-plus-m7-1d808330...`，重启 `qq-bridge` | 备份 `config.json.bak-2153`；重启后 active、NRestarts=0；远端 `tts-batch` 实测新音色 4 个语气均正常合成（wav 1.8~2.6s） |
+| 01:00 | 第八次发布：合并 M11 `b456283` / M12 `699ef05` → `deploy.ps1`（M11 `bridge.js`+`tools/capabilities.js`）+ scp patch（M12）+ 重启 `dsh-web` | 全绿 749；备份 `src.bak-010024`、patch 备份 `qq-chat-v2.patch.yml.bak-0100`；部署锁已释放；两服务 active、NRestarts=0 |
 
 **回滚点（记清楚，别搞错）**
 
 | 目的 | 用什么 | 说明 |
 | --- | --- | --- |
-| 代码整轮回滚（含 M8） | `/opt/qq-bridge/src.bak-215008` | **M8 上线前的完整快照**，当前最新回滚点 |
+| 代码整轮回滚（含 M11） | `/opt/qq-bridge/src.bak-010024` | **M11 上线前的完整快照**，当前最新回滚点 |
+| preset 回滚（含 M12） | `.../presets/qq-chat-v2.patch.yml.bak-0100` | M12 上线前的 patch |
+| 代码整轮回滚（含 M8） | `/opt/qq-bridge/src.bak-215008` | M8 上线前的完整快照 |
 | 代码整轮回滚（含 M3+M4） | `/opt/qq-bridge/src.bak-185849` | M3+M4 上线前的完整快照 |
 | preset 回滚（含 M9） | `.../presets/qq-chat-v2.patch.yml.bak-2150` | M9 上线前的 patch |
 | 代码整轮回滚（含 M1） | `/opt/qq-bridge/src.bak-172224` | M1 上线前的完整快照 |
@@ -96,10 +99,11 @@ ssh root@175.178.200.118 "cp -a /opt/qq-bridge/plugins/qq-agent-presets/presets/
 | --- | --- |
 | `src/guards/outbound-content.js` | `d7d2c989e9726bbfb5e22c1f46975c93` |
 | `src/content/memory-render.js` | `7067dd908a2b0fb6a3eebdc0646c9386` |
-| `src/bridge.js` | `e3eb27d15051f2ce6b1d623b286a639e` |
+| `src/bridge.js` | `1d5dcd8be9c640b654a9d9d4b3a5c03a` |
 | `src/memory/risk-profile.js` | `c52b6d57d69d54a49af28b81f6415bbd` |
 | `src/memory/affection-profile.js` | `ca5f5af4ce39b51fd38a8331d1e15e40` |
-| `plugins/.../qq-chat-v2.patch.yml` | `8fe29193a24f15ec027384b5af6617ac` |
+| `src/tools/capabilities.js` | `c827dc4c17c2e3fba6c30146b8f8417d` |
+| `plugins/.../qq-chat-v2.patch.yml` | `974de7636e111c6ccdea8749e08f3848` |
 
 ---
 
@@ -107,7 +111,7 @@ ssh root@175.178.200.118 "cp -a /opt/qq-bridge/plugins/qq-agent-presets/presets/
 
 | 项 | 证据 |
 | --- | --- |
-| 单测 | `node --test tests/*.test.mjs` → **711 通过 / 0 失败**（692 + M8 的 12 + M9 的 7） |
+| 单测 | `node --test tests/*.test.mjs` → **749 通过 / 0 失败**（711 + M11 的 25 + M12 的 13） |
 | preset 契约 | `node scripts/test-agent-preset-patches.mjs` → 通过 |
 | 线上模块 | 在服务器跑 `evaluateContent`：实体命中→拦、称呼命中→拦、owner 私聊→放行（`entity false entity / kinship false kinship / owner true`） |
 | R1 线上判定 | `床以外都是远方`→`presetEcho` 拦；`行吧，床以外都是远方，睡`→拦；`今天的运动量还行`→放行 |
@@ -117,6 +121,8 @@ ssh root@175.178.200.118 "cp -a /opt/qq-bridge/plugins/qq-agent-presets/presets/
 | M8 线上判定 | `memberImpressions` 增 `affection`（好感度/关系温度，-100~100 有符号分 + 标签）；`markKinshipRefusalV2` 拒绝称呼时连带下调 10 分（`KINSHIP_COOLING_DELTA`）；`renderMemory` 印象行渲染好感度（没写过的不渲染，老数据兼容）；单测 12 条覆盖增减/夹断/去重/防原型污染/纯函数 |
 | M9 线上判定 | preset 增「逐条思考再回（防抖）」整段（合并碎片、同一件事只回一次、回的顺序跟读的顺序）；patch 已重建 `--check` 过、md5 一致；契约 7/7 绿 |
 | M10 线上判定 | 新增只读探针 `scripts/probe-qq-profile.mjs`（用「非法类型参数」探测改资料动作是否存在，1400=支持/1404=不支持，绝不真改）；**结论待 SnowLuma 在线时在远端跑一次** |
+| M11 线上判定 | 远端实测 `GET /api/socialV2/prompt` 返回 **`capabilities` 22 项**（人话，如「发语音」「发表情包」「汇报故障」），字段 `{name,desc,enabled,why?}` 合规；`enabledTools` 仍 52 项并存。`qq_report_feedback(level='error')` 已改为真发私聊 owner（去掉了从未接线的 `notifyOwnerOnError` 开关判定），带 10 分钟同内容冷却 |
+| M12 线上判定 | 远端 patch 含【被问「你会什么」：说人话】与【坏了怎么办：报一次，别念报错】两段；契约 7/7 绿 |
 | 文件一致 | src + patch 的 md5 本地/远端完全一致 |
 | 服务 | `qq-bridge` / `dsh-web` 均 `active` |
 | 真实拦截 | **0 次**（`entity-blocked` 0、`kinship-blocked` 0、`preset-echo` 0、`suspicious-file` 0）——见第 7 节 |
