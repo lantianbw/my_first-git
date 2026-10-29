@@ -13901,6 +13901,33 @@ async function main() {
     appendActivity(`[sleep-gate] ${key} 睡眠中（${why}，${gate.sleepAt} 睡 ${gate.wakeAt} 起），群消息不唤醒：${String(textContent ?? '').slice(0, 60)}`);
   }
 
+  // ── 点名门（M4）：@/叫名字/被引用 只保证「会看」，不保证「一定接」 ──────
+  // 同一人连续点名达到阈值以上（期间 AI 没回过话）时，@/名字 不再单独触发唤醒，
+  // 落回关键词/提问/指定成员/概率等其余触发继续判断。消息本身已进 unread，仍是「会看」。
+  // 计数只随「点名」推进：别人普通闲聊不打断同一人的连续点名（见下方辅助函数）。
+  const MENTION_GATE_THRESHOLD = 3;
+
+  // 推进「连续点名」计数并返回新值。规则：
+  //   · 换人点名 / AI 在链期间回过话 → 重新从 1 计；
+  //   · 同一人、AI 未回 → 计数 +1。
+  // 链是进程内存态（st 上的懒字段），重启自然清零——重启也算一次「AI 没回过」的中断。
+  function advanceMentionChainV2(st, speakerId) {
+    const sid = String(speakerId ?? '');
+    const lastReply = Number(st.lastAiReplyAt) || 0;
+    const chainReplyAt = Number(st.mentionChainLastReplyAt) || 0;
+    const sameSpeaker = sid !== '' && st.mentionChainSpeakerId === sid;
+    const aiReplied = lastReply > chainReplyAt;
+    if (!sameSpeaker || aiReplied) {
+      st.mentionChainSpeakerId = sid;
+      st.mentionChainCount = 1;
+      st.mentionChainLastReplyAt = lastReply;
+      return 1;
+    }
+    const next = (Number(st.mentionChainCount) || 0) + 1;
+    st.mentionChainCount = next;
+    return next;
+  }
+
   function evaluateWakeTriggerV2(key, st, event, kind, textContent, plainContent, quoteTargetIsSelf) {
     if (kind === 'private') return 'private';
     const tr = st.wakeConfig?.triggers ?? {};
@@ -13916,15 +13943,29 @@ async function main() {
       }
     }
     if (tr.anyMessage) return 'anyMessage';
-    if (tr.atMention) {
-      const atSelf = Array.isArray(event?.message) && event.message.some((seg) => seg?.type === 'at' && String(seg.data?.qq) === String(event?.self_id ?? ''));
-      if (atSelf || quoteTargetIsSelf) return 'atMention';
-    }
-    if (tr.nameMention && selfNickname) {
-      // 用 plainContent（当前消息自己的文字）：textContent 含 `[引用 某人：原文]`，
-      // 引用一条恰好提到机器人昵称的旧消息不该算「叫了名字」（那是被动触发的付费回合）。
-      const lower = String(plainContent ?? '').toLowerCase();
-      if (lower.includes('@' + selfNickname.toLowerCase()) || lower.includes(selfNickname.toLowerCase())) return 'nameMention';
+    // ── 点名判断：@ / 叫名字 / 被引用 都算点名，走「连续点名」门 ─────────
+    const atSelf = !!tr.atMention && Array.isArray(event?.message) && event.message.some((seg) => seg?.type === 'at' && String(seg.data?.qq) === String(event?.self_id ?? ''));
+    const quoted = !!tr.atMention && !!quoteTargetIsSelf;
+    // 用 plainContent（当前消息自己的文字）：textContent 含 `[引用 某人：原文]`，
+    // 引用一条恰好提到机器人昵称的旧消息不该算「叫了名字」（那是被动触发的付费回合）。
+    const mentionLower = String(plainContent ?? '').toLowerCase();
+    const byName = !!tr.nameMention && !!selfNickname
+      && (mentionLower.includes('@' + String(selfNickname).toLowerCase()) || mentionLower.includes(String(selfNickname).toLowerCase()));
+    const isMention = atSelf || quoted || byName;
+    if (isMention) {
+      const speakerId = String(event?.user_id ?? event?.sender?.user_id ?? '');
+      const chainCount = advanceMentionChainV2(st, speakerId);
+      if (chainCount < MENTION_GATE_THRESHOLD) {
+        if (atSelf || quoted) return 'atMention';
+        return 'nameMention';
+      }
+      // 连续点名达到阈值：@/名字 不再单独唤醒，只保证「会看」，落回其余触发判断。
+      // 记一条节流 activity 供线上观察（10 分钟最多一条，避免刷屏）。
+      const now = Date.now();
+      if (!st.mentionGateLastLogAt || now - Number(st.mentionGateLastLogAt) > 10 * 60 * 1000) {
+        st.mentionGateLastLogAt = now;
+        appendActivity(`[mention-gate] ${key} ${speakerId} 连续点名 ${chainCount} 次，@/名字不再单独唤醒：${String(plainContent ?? '').slice(0, 60)}`);
+      }
     }
     if (Array.isArray(tr.keywords) && tr.keywords.length) {
       const lower = String(plainContent ?? '').toLowerCase();
