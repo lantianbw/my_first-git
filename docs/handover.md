@@ -1,7 +1,7 @@
 # qq-bridge 工作交接文档
 
 > 2026-10-29 版。面向接管者：读完这一份即可接手日常运维与后续开发。
-> 配套文档：`module-catalog.md`（模块目录）、`module-wiring-feasibility.md`（接线处置）、`roadmap.md`（后续任务）、`mod-system-draft.md`（mod 系统设计）。
+> 配套文档：`module-catalog.md`（模块目录）、`module-wiring-feasibility.md`（接线处置）、`roadmap.md`（后续任务）、`mod-system-draft.md`（mod 系统设计）、`trap-hardening-handover.md`（2026-10-29 加固交接：改了什么、怎么验、还剩什么）。
 > **本文不含任何令牌/密码**：远端为 SSH 密钥登录，凭据不在文档、也不在仓库里。
 
 ---
@@ -141,10 +141,11 @@ docs/                  # 本文件 + 四份设计/目录文档
 
 | 项 | 值 |
 | --- | --- |
-| 线上版本 | 2026-10-29 12:37:29 起，`active` |
-| 本地/远端 src | 94 / 94 文件，md5 完全一致 |
+| 线上版本 | 2026-10-29 14:54:25（src）/ 15:29:16（preset）起，`active` |
+| 本地/远端 src | 95 / 95 文件，md5 完全一致 |
 | 测试 | 649 通过；router 33 条；`test-voice` 83/0 |
 | 模块 | 契约 63 个全部有处置：15 上线、8 判定不接（4 已删）、其余早已在跑；**无待接线** |
+| 出站守卫 | `guards/outbound-content` 1.2.0：敏感人物名 + 非 owner 亲属称呼硬拦；真实命中 0 次（未验证），见 `trap-hardening-handover.md` |
 | mod 系统 | v1 已上线：`mods/loader + mods/host`，挂点 `inbound.observe / outbound.observe / wake.before / tick.daily`；无 mod 时零行为 |
 | 影子 | `session/router`、`inbound/message`、`scheduler/triggers` 均在跑，**分歧 0** |
 | 历史裁剪 | `maxAgeHours=12`（原 24）；一次轮换把 owner 会话 460k → 41.6k（−91%） |
@@ -160,6 +161,7 @@ docs/                  # 本文件 + 四份设计/目录文档
 | SnowLuma 自报静默 | 其 Hook 在 105 秒无 QQ 报文时即报 `good=false`；桥接已去抖：连续 **10 分钟**才告警，短抖动仅记 `suspect` | 不要自动重启：绝大多数是空闲误报，下一报文到达即恢复；真故障看持续 >10 分钟 |
 | 归档 `topics` 为空 | 轮换快照里长期话题 0 条 | **已核查**：主人会话近 2 天 `qq_memory_append` 调用 0 次，属模型没写，不是轮换丢数据；`activeTopics` 本身跨轮换保留，回注也仍带最近 6 条发言。顺带修掉回注重复注入关系线/记忆块；并已收紧 `qq-chat-v2` 第 8 条与【记忆卫生】：私聊出现约定/计划/他在做的事必须记一条 activeTopic（≤30 字），收尾自检一次 |
 | 控制台令牌 | 启动日志"未配置，自动生成"；`/api/socialV2/rotation/preview` 401 | 进程内 token 与 `state/console-token` 不同步 |
+| `test-qq-preset-contract` 红线 | 断言人格里要有 `qq_memory_clear`，实际 preset 从未写过该工具 | 存量问题（`1feed9b` 同样红），非加固引入；要么补一句人格、要么删该断言，先确认产品意图 |
 | OCR 服务忙 | OneBot 返回 `code=200 msg=服务忙` | 桥已重试 3 次 |
 | 双日志路径 | 见 2.3 | 排查时容易看错文件 |
 

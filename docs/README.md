@@ -65,10 +65,22 @@
 
 ---
 
+## 交接 / 复盘（按时间读，越新越权威）
+
+| 文档 | 一句话说明 | 状态 |
+| --- | --- | --- |
+| [handover.md](handover.md) | **接手入口**：环境与连接、部署/回滚、测试两套体系、自动化任务、当前状态、已知问题、纪律 | ✅ 2026-10-29 更新（含加固后状态） |
+| [trap-hardening-handover.md](trap-hardening-handover.md) | **本轮加固交接**：改了哪几处、上线与回滚点（含「半传快照」陷阱）、验收证据、运维手册、10 项待办、8 条局限 | ✅ 2026-10-29 |
+| [chat-trap-review.md](chat-trap-review.md) | 「被套路」复盘与任务书：802 条消息里的事件清单、套路拆解、P0~P2 方案、AI 味体检（§12） | ✅ 2026-10-29 |
+| [roadmap.md](roadmap.md) | 后续任务与每日观察节点 | ✅ |
+
+---
+
 ## 想找什么 → 去哪看
 
 | 我想…… | 看这个 |
 | --- | --- |
+| 刚接手这个项目 | [handover.md](handover.md) → [trap-hardening-handover.md](trap-hardening-handover.md) |
 | 搞懂整体架构 / 全部配置项 | [guides/PROJECT_GUIDE.md](guides/PROJECT_GUIDE.md) |
 | 在新设备上把 qq-bridge 接进 DSH | [guides/DSH_SETUP.md](guides/DSH_SETUP.md) |
 | 发语音 / 换 QQ 账号后语音工具 401 | [guides/VOICE.md](guides/VOICE.md)（独立工具在仓库上一级 `../voice-tool/`） |

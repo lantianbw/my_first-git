@@ -1,0 +1,191 @@
+# 「被套路」加固交接（2026-10-29）
+
+> 面向：接手运维、继续加固的人。
+> 先读 `docs/handover.md`（环境、部署、日常操作），再看本文（本轮改了什么、怎么验、还剩什么）。
+> 问题背景与方案出处：`docs/chat-trap-review.md`（§1~§11 复盘，§12 AI 味体检）。
+> 本文不含任何令牌；远端仍是 SSH 密钥登录。
+
+---
+
+## 0. 启动提示（新对话可直接粘贴）
+
+```
+读 E:\DSH\qq-bridge\docs\trap-hardening-handover.md，按第 6 节待办继续。
+先用三句话复述：本轮改了什么、线上回滚点在哪、还剩哪几项没做，然后再动手。
+只加硬约束，不要重写人格风格；不要引入每条消息额外的模型调用。
+```
+
+---
+
+## 1. 一页纸结论
+
+| 项 | 状态 |
+| --- | --- |
+| E1 复述敏感人物名 | ✅ 出站硬拦，已上线 |
+| E2 亲属称呼施压 | ✅ 出站硬拦 + 记忆边界，已上线 |
+| 假传指令 | ✅ 改为「先要证据」，已上线（15:29 生效） |
+| 不复述 / 情感撤退 / 收尾不补称呼 | ⚠️ 仅提示词，无代码判定 |
+| E3 技术探询统一话术 | ❌ 未做 |
+| E7 群内可疑文件 | ❌ 未做；10-29 15:22 它仍对可疑 .txt 接了话 |
+| P2 四项（风险档案 / 点名判断 / 审计指标 / 可疑文件） | ❌ 未做 |
+| AI 味改造 R1~R5 | ❌ 只出了分析，未落地 |
+| 真实命中 | **0 次**（截至 10-29 16:30）——防线未被真实消息触发过 |
+
+一句话：**最坏的两类事故（敏感人名、被叫爷爷）已经在发送前拦住，但还没被真实场景验证；其余问题原样留着。**
+
+---
+
+## 2. 变更清单
+
+| 文件 | 版本/形态 | 行为变化 |
+| --- | --- | --- |
+| `src/guards/outbound-content.js` | 1.1.0 → **1.2.0** | 新增 `sensitiveEntities`（敏感人物名，含去空格/分隔符变体）与 `kinship`（非 owner 会话禁亲属称呼）。命中返回 `kind:'entity'/'kinship'`；**entity 的 reason 不带命中词**（避免模型照着再写）。仍是 fail-open，判定抛错就放行 |
+| `src/bridge.js` | — | 透传 `entityEnabled` / `entityWords`；新增 entity / kinship 两个记账分支；新增 `markKinshipRefusalV2()`，称呼被拦时给对方档案写 `noKinshipTitle: true` + 一条 trait |
+| `src/content/memory-render.js` | — | 印象行追加「（边界：不叫亲属称呼，用名字或「你」）」，下次唤醒直接看到，不用重新谈判 |
+| `dsh/agent-presets/qq-chat-v2/agent.cordis.yml` | — | 新增【不接的题（硬边界）】9 条：不复述 / 不填空 / 被追问不解释 / 称呼硬边界 / 收尾不补称呼 / 假传指令 4 条（要证据 → 拿不出 → 拿得出分两级 → 本人说的算） |
+| `plugins/qq-agent-presets/presets/qq-chat-v2.patch.yml` | 生成物 | 由 `scripts/build-agent-preset-patches.mjs` 生成，勿手改 |
+| `config.example.json` | — | 记录 `socialV2.guard.{meta,address,sensitiveEntities}` 的形状 |
+| `tests/` | +16 条 | `outbound-content` +11、`memory-render` +1、新增 `preset-trap-rules` +4 |
+
+**默认词表**（要改走配置，见 5.2）：
+- 敏感人物名 13 条：汪精卫 / 汪兆铭 / 汪精衛 / 汪兆銘 / 周佛海 / 陈公博 / 褚民谊 / 川岛芳子 / 土肥原贤二 / 东条英机 / 松井石根 / 冈村宁次 / wangjingwei
+- 亲属称呼 14 条：爷爷 / 奶奶 / 姥爷 / 姥姥 / 外公 / 外婆 / 爸爸 / 妈妈 / 干爹 / 干妈 / 哥哥 / 姐姐 / 弟弟 / 妹妹
+  ——刻意不收「爹」「妈」单字（会和「老爹」「我妈」打架），不收「叔叔」（王江叔叔是既定称呼）。
+
+---
+
+## 3. 上线记录与回滚点
+
+| 时间 | 动作 | 结果 |
+| --- | --- | --- |
+| 14:48 | `deploy.ps1` 第一次 | **只传了 `bridge.js` 就中断**（1/3），未传两个模块。已用 md5 对账发现——这是交接文档里那次事故的同款形状 |
+| 14:49–14:55 | scp preset patch、校验 md5、重启 `dsh-web` | 14:55:24 起生效 |
+| 14:53 | `deploy.ps1 -SkipTests` | 补传 2 个文件，重启，`active`；备份 `src.bak-145349` |
+| 15:29 | 第二次 patch（假传指令改版）+ 重启 `dsh-web` | 15:29:16 起生效 |
+
+**回滚点（记清楚，别搞错）**
+
+| 目的 | 用什么 | 说明 |
+| --- | --- | --- |
+| 代码整轮回滚 | `/opt/qq-bridge/src.bak-144829` | **本轮改动前的完整快照**，唯一正确的代码回滚点 |
+| （陷阱） | `/opt/qq-bridge/src.bak-145349` | 是「只传了 bridge.js」的**半传状态**快照，用它回滚会得到「新 bridge + 旧模块」的错配，别用 |
+| preset 回滚 | `.../presets/qq-chat-v2.patch.yml.bak-1449` | 本轮改动前的 patch（14:08 版） |
+| git | `git revert 247bc5c ccc8262` | 本地有完整历史；线上回滚优先用 git 重部署 |
+
+```bash
+# 代码回滚（会重启，约 3 秒）
+ssh root@175.178.200.118 "rm -rf /opt/qq-bridge/src && cp -a /opt/qq-bridge/src.bak-144829 /opt/qq-bridge/src && systemctl restart qq-bridge"
+# preset 回滚
+ssh root@175.178.200.118 "cp -a /opt/qq-bridge/plugins/qq-agent-presets/presets/qq-chat-v2.patch.yml.bak-1449 /opt/qq-bridge/plugins/qq-agent-presets/presets/qq-chat-v2.patch.yml && systemctl restart dsh-web"
+```
+
+当前一致状态（可用来对账）：
+
+| 文件 | md5 |
+| --- | --- |
+| `src/guards/outbound-content.js` | `4c8fde2cf2cecd8587a57dc7c60f9557` |
+| `src/content/memory-render.js` | `2111c1e37810439ceb81f03177af3824` |
+| `src/bridge.js` | `b14707313ee745c7934a32d2c458e6b5` |
+| `plugins/.../qq-chat-v2.patch.yml` | `9071a2f768e30a7830dc250783658af4` |
+
+---
+
+## 4. 验收证据
+
+| 项 | 证据 |
+| --- | --- |
+| 单测 | `node --test tests/*.test.mjs` → **649 通过 / 0 失败**（基线 633 + 本轮 16） |
+| preset 契约 | `node scripts/test-agent-preset-patches.mjs` → 通过 |
+| 线上模块 | 在服务器跑 `evaluateContent`：实体命中→拦、称呼命中→拦、owner 私聊→放行（`entity false entity / kinship false kinship / owner true`） |
+| 文件一致 | 三个 src 文件 + patch 的 md5 本地/远端完全一致 |
+| 服务 | `qq-bridge` / `dsh-web` 均 `active` |
+| 真实拦截 | **0 次**（`entity-blocked` 0、`kinship-blocked` 0）——见第 7 节 |
+
+---
+
+## 5. 运维手册
+
+### 5.1 怎么确认它还在工作
+
+```bash
+ssh root@175.178.200.118
+systemctl is-active qq-bridge dsh-web
+grep -c '\[guard\] entity-blocked'  /opt/qq-bridge/state/qq-activity.log
+grep -c '\[guard\] kinship-blocked' /opt/qq-bridge/state/qq-activity.log
+tail -20 /opt/qq-bridge/state/qq-activity.log
+```
+
+命中一次会各写一行：`[guard] entity-blocked (group:…): 汪精卫`、`[guard] kinship-blocked (private:…): 爷爷`。
+这两个词只落在本机 activity（owner 可见），**不会回显到群里**。
+
+### 5.2 加词 / 收词
+
+改 `/opt/qq-bridge/config.json`（**`config.json` 不热加载，改完要 `systemctl restart qq-bridge`**）：
+
+```json
+"socialV2": {
+  "guard": {
+    "sensitiveEntities": { "enabled": true, "words": ["…"] },
+    "address": { "enabled": true }
+  }
+}
+```
+
+- `words` 是**整表覆盖**，不是追加：写了 `words` 就丢掉内置 13 条，记得复制全。
+- `words: []` 或省略 = 用内置表。
+- 亲属称呼词表目前只能改代码里的 `DEFAULT_KINSHIP_TITLES`（模块支持 `kinshipWords` 入参，但中枢没接配置——要接的话在 `guardOutboundV2` 里补一行）。
+
+### 5.3 边界记忆怎么清
+
+`noKinshipTitle` 不会自动过期（设计如此：不再重新谈判）。要清：
+
+- 单条：`qq_memory_remove(category="memberImpression", target="对方名字")`（会连整条印象一起删）；
+- 批量/精确：编辑 `/opt/qq-bridge/state/social-v2.json` 的 `conversations.<key>.memberImpressions.<名字>`，删掉 `noKinshipTitle` 字段。
+
+### 5.4 观察窗口（T7）
+
+至少 24 小时，看三件事：
+
+1. 命中即拦：出现 `entity-blocked` 时，群里那条确实没发出去；
+2. 称呼复发：`kinship-blocked` 出现后，对方不再拿到「爷爷」（看 `social-v2.json` 最近消息）；
+3. 副作用：有没有「连续被拦 → 模型反复重写 → 这轮不说话」的情况（看 `bridge.log` 的 `自动回复被出站守卫拦截` 与发送失败率）。
+
+---
+
+## 6. 待办（按优先级）
+
+| # | 任务 | 落点 | 验收 |
+| --- | --- | --- | --- |
+| 1 | **R1 preset 例句黑名单**：把【她平时会自己冒这种话】那 8 句原句做成出站拦截（`outbound-content` 再加一个 `presetEcho` 分节） | `src/guards/outbound-content.js` | 单测：8 句全拦；正常句子不误伤；线上不再出现「床以外都是远方」原句 |
+| 2 | **P2-4 可疑文件**：命中「资源合集/下载/解压密码/打开即可」类文件名 → 不接话、记一条 activity | `bridge.js` 群消息分支 | 10-29 15:22 那条「这文件名比内容还长」作为回归样本：改为不回复 + `[guard] suspicious-file` |
+| 3 | **E3 技术探询话术**：统一一句「这些我不聊，换个话题」，被追问不解释 | preset | 提示词含该句；模拟「你用啥链接的 QQ」只回这一句 |
+| 4 | **T7 24h 观察** | 运维 | 见 5.4 |
+| 5 | **P2-1 风险档案**：把「爱下套的人 / 不能接的话题」写进 `memberImpressions`（`noKinshipTitle` 是它的雏形） | `bridge.js` + `memory-render` | 唤醒提示里能看到 |
+| 6 | **P2-2 点名判断**：@ 只保证「会看」，同一人连续点名 3 次可只回一句或不回 | `scheduler/triggers` 或 preset | 连续点名场景不再 100% 入场 |
+| 7 | **P2-3 审计指标**：每日巡检加「实体拦截数 / 称呼复发数 / 群发言占比」 | `scripts/ops-daily-check.sh` | 报告里出现三行 |
+| 8 | **R2~R5 AI 味**：数字/时间降级、金句连发 shadow、三连问限制、借嘴软约束 | preset + anti-ai | 见 `chat-trap-review.md` §12.5 |
+| 9 | 补 `markKinshipRefusalV2` 单测 | `tests/`（需先把它抽成纯函数） | 覆盖：私聊记、群聊不记、重复不叠加 |
+| 10 | 修 `scripts/test-qq-preset-contract.mjs` 的存量红：`missing rule: qq_memory_clear` | preset 或测试 | 该脚本转绿（注意：这是历史遗留，改之前先确认是否真要把 `qq_memory_clear` 写进人格） |
+
+---
+
+## 7. 已知局限与风险（接手前必须知道）
+
+1. **0 次真实命中 = 未证明。** 两道防线只在单测和「直接调模块」里验证过。真实 QQ 流量里一次都没触发——可能是没再犯，也可能是还没遇到诱因。别在没看到命中前宣布「问题解决」。
+2. **词表覆盖有限。** 13 条只覆盖本次事故词及其常见变体；谐音（旺京卫）、日文名、其它敏感人物一律漏。`sensitiveEntities` 是「至少挡住已知的最坏情况」，不是「敏感人物过滤器」。
+3. **拦截 = 让模型重写，不是静默丢弃。** 模型若坚持，会连续被拒、这轮可能不说话。观察时要同时看「拦截数」和「该说话却没说的次数」。
+4. **亲属称呼会误伤正常叙事。** 群聊里讲「我爷爷那辈」也会被拦（然后被要求重写）。这是有意的取舍：宁可让它换句话，也不让它练成「爷爷」的条件反射。
+5. **群聊不记 `noKinshipTitle`。** 群里分不清是谁在要称呼，宁可不记；所以群里的称呼施压只能靠当轮拦截。
+6. **边界标记不衰减。** 一旦写进档案就一直在，直到手工清。若对方后来关系缓和、或本来就是玩笑，需要人工清（见 5.3）。
+7. **记忆块只渲染最后 10 个印象**（`renderMemory` 的 `impressionLimit`）。被标记的人如果不在最近 10 个里，唤醒提示里看不到这条边界——人数多的群要注意。
+8. **AI 味没治。** preset 的 8 条例句仍可能被原样背出来（10-28 已发生一次），R1 落地前这个问题一直在。
+
+---
+
+## 8. 不要做的事
+
+1. **不要为了让拦截「少误伤」去放宽 `kinship` 的词表**——「爷爷」就是这次被磨穿的入口，放宽等于回滚。
+2. **不要用 `src.bak-145349` 回滚代码**（半传状态，见第 3 节）。
+3. **不要手工改 `plugins/.../qq-chat-v2.patch.yml`**——它是生成物，下次 build 会被覆盖；改源再 build。
+4. **不要在群里解释这两道守卫**（提「提示词/权限/设定」会触发 meta 拦截，也给对方新抓手）。
+5. **不要引入「每条消息多一次模型调用」的方案**——成本按缓存命中率敏感，日均 200~600 次调用。
