@@ -107,6 +107,8 @@ import { loadAntiAiPatterns, checkAntiAi } from './anti-ai-patterns.js';
 import { evaluate as scoreText, formatVerdict } from './scorer.js';
 import { createChain } from './guards/chain.js';
 import { createModuleSwitch } from './tools/module-switch.js';
+// 能力清单（人话）+ 告警文案/冷却：见 src/tools/capabilities.js 头部（M11）。
+import { buildCapabilities, createAlertCooldown, renderFeedbackAlert } from './tools/capabilities.js';
 import { createModLoader } from './mods/loader.js';
 import { createModHost } from './mods/host.js';
 import { createRelationStore } from './content/relation-store.js';
@@ -1615,6 +1617,8 @@ async function main() {
   const slangExtractionCooldowns = new Map(); // key -> timestamp
   const slangSubmitTimes = new Map();   // key -> [timestamp]：AI 提交黑话候选限频（内存态）
   const feedbackTimes = new Map();      // key -> [timestamp]：AI 反馈限频（内存态）
+  // 错误级反馈 → 私聊主人的告警去重：同一会话同一内容 10 分钟内只发一次（同样只在内存里）。
+  const feedbackAlertCooldown = createAlertCooldown();
   const memeAddTimes = new Map();       // key -> [timestamp]：AI 写梗库限频（内存态）
   const slangResearchingIds = new Set(); // 正在研究中的候选 id，防止重复排队
   const learnerSessions = new Set();    // sessionId -> 学习会话（不映射 QQ，不发送）
@@ -5486,6 +5490,9 @@ async function main() {
               proactive: cfg.socialV2?.proactive ?? {}
             },
             enabledTools,
+            // 人话能力清单：被问「你会什么」时照这个答，不要背工具名（M11，形状见 src/tools/capabilities.js）。
+            // 与 enabledTools 同源不同粒度：enabledTools 是「调用清单」，capabilities 是「介绍自己的说法」。
+            capabilities: buildCapabilities(cfg),
             replyTiming: replyTimingV2(st),
             unreadCount: unreadCountV2(st),
             recentCount: st.recentMessages.length,
@@ -7274,8 +7281,19 @@ async function main() {
           appendFeedbackEntry({ id: Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8), key, level, message, time: new Date().toISOString() });
           log(`[reserved2] AI 反馈 (${key}) [${level}]: ${message.slice(0, 80)}`);
           appendActivity(`${key} [reserved2] AI 反馈 [${level}]：${message.slice(0, 80)}`);
-          if (cfg.socialV2?.feedback?.notifyOwnerOnError && level === 'error' && cfg.ownerQQ) {
-            log(`[reserved2] 错误级反馈，可通知 owner ${cfg.ownerQQ}（当前仅记录日志）`);
+          if (level === 'error' && cfg.ownerQQ) {
+            // M11：错误级反馈**真的**私聊主人（以前只写一行 log，坏了没人知道）。
+            // 不去看 socialV2.feedback.notifyOwnerOnError：那个键从加上起就没接线、默认还是 false，
+            // 照它判定等于把告警通道永久关着。真正怕吵的开关是 socialV2.tools.feedback（关掉连工具都不注册）。
+            // 防刷屏有两层：这里 10 分钟同内容冷却（内存态，重启即清），外加本路由原有的 5 次/分、20 次/小时限频。
+            const alertId = `${key}\n${message}`;
+            if (feedbackAlertCooldown.shouldSend(alertId)) {
+              // 不 await：告警不能拖慢工具返回；失败已在 sendToQQ 内部记账，这里只补一条日志。
+              sendToQQ(`private:${cfg.ownerQQ}`, renderFeedbackAlert(key, message))
+                .catch((error) => log('[feedback] 通知主人失败:', error?.message ?? error));
+            } else {
+              log(`[feedback] 10 分钟内同样的错误反馈，已合并（${key}）：${message.slice(0, 60)}`);
+            }
           }
           sendJson({ ok: true, key, level, message });
           return;
