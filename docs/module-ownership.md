@@ -23,8 +23,9 @@
 | **M4** | 点名与调度 | §6-6 点名判断 | `src/bridge.js` **仅 `evaluateWakeTriggerV2` 一带**、`tests/*`；如需改话术才动 preset | 出站守卫、记忆段 | M2 + M3 | 第 3 批 |
 | **M5** | 运维与审计 | §6-4 24h 观察、§6-7 审计指标 | `scripts/ops-daily-check.sh`、`docs/trap-hardening-handover.md`（只追加观察记录） | `src/*`、preset | 无 | 全程并行 |
 | **M6** | 存量清理 | §6-10 preset 契约红 | `scripts/test-qq-preset-contract.mjs`；若最终决定改 preset，则并入 M2 之后 | `src/bridge.js` | M2（若改 preset） | 第 2 批 |
+| **M7** | 音色复刻换声 | 新需求：TTS 声音太人机 | `config.json`（本地 .gitignore，不进 git）、可新增 `scripts/clone-voice.mjs`（复刻辅助脚本） | `src/*`、preset、`plugins/*` | 无（独立泳道） | 独立 |
 
-**为什么这么切**：`src/bridge.js` 是唯一热点，M1/M3/M4 都会碰它，所以必须串行；preset 是第二热点，M2/M6 串行；其余文件天然隔离。
+**为什么这么切**：`src/bridge.js` 是唯一热点，M1/M3/M4 都会碰它，所以必须串行；preset 是第二热点，M2/M6 串行；其余文件天然隔离。M7 只动 `config.json`（换 `socialV2.voice.tts.voiceId`）+ 一个复刻辅助脚本，不碰代码泳道与 preset 泳道，天然隔离。
 
 ---
 
@@ -34,6 +35,7 @@
 Lane A（代码 / bridge 串行）:  M1 ──→ M3 ──→ M4
 Lane B（提示词 / preset）:      M2 ──→ M6（若改 preset）
 Lane C（运维 / 只读）:          M5 ──────────────────→（24h 后出观察结论）
+Lane D（配置 / 运营）:          M7（音色换声，只改 config.json + 复刻脚本，独立）
 ```
 
 - **第 1 批（可同时开 3 个对话）**：M1 + M2 + M5
@@ -104,8 +106,14 @@ git worktree add ../qq-bridge-m2 -b mod/m2-preset-boundaries
 
 | 模块 | 工作区 | 分支 | 状态 |
 | --- | --- | --- | --- |
-| M3 | `E:\DSH\qq-bridge-m3` | `mod/m3-memory-risk` | 待开工 |
-| M4 | `E:\DSH\qq-bridge-m4` | `mod/m4-mention-gate` | 阻塞（等 M3） |
+| M3 | `E:\DSH\qq-bridge-m3` | `mod/m3-memory-risk` | 已完成（635154b，已合并） |
+| M4 | `E:\DSH\qq-bridge-m4` | `mod/m4-mention-gate` | 已完成（e148c5d，已合并） |
+
+**第 3 批工作区已建好：**
+
+| 模块 | 工作区 | 分支 | 状态 |
+| --- | --- | --- | --- |
+| M7 | `E:\DSH\qq-bridge-m7` | `mod/m7-voice-clone` | 待开工 |
 
 所有工作区的 `node_modules` 已用目录联接指向主干仓库，可直接跑测试/构建。
 
@@ -226,6 +234,41 @@ git worktree add ../qq-bridge-m2 -b mod/m2-preset-boundaries
 结束前按四行汇报。
 ```
 
+### M7 音色复刻换声
+
+**目标**：把 TTS 现在「太人机」的音色，换成一段真人声音克隆出来的音色。只改 `config.json` 的 `socialV2.voice.tts.voiceId`（本地 .gitignore 文件，不进 git），可选新增一个复刻辅助脚本 `scripts/clone-voice.mjs`。**零代码改动**（不碰 `src/*`、preset、`plugins/*`）。
+
+**背景事实（已核实，别再查）**：
+- 当前音色 `cosyvoice-v3.5-plus-xluma-722f1767a5d348869159ac284cce7986`（model `cosyvoice-v3.5-plus`）本身已是「复刻音色」，链路跑通过。
+- 百炼 API key 已就绪：`~/.dsh/.credentials.yaml` 的 `refs.BAILIAN_API_KEY`（`src/tts-lib.js` 的 `readBailianApiKey` 能读到）。
+- 音色复刻（voice cloning）阿里云**免费**、个人可用，用 10~20 秒人声样本，无需训练。
+- 复刻接口：`voice-enrollment` + `action=create_voice`，参考音频走 `audio` 字段（URL 或 base64），返回 `voice_id`。
+- **唯一需现场验证的点**：`src/tts-lib.js` 第 14 行注释写「复刻必须走 dashscope 老域名」，但当前 TTS 合成用的是 workspace 专属域名 `ws-rk8hg92mj2eun18t.cn-beijing.maas.aliyuncs.com`。复刻到底走哪个域名，需实测（先试 workspace 域名，不行再试 `dashscope.aliyuncs.com/api/v1`）。
+
+**样本要求（阿里云官方）**：10~20 秒清晰人声朗读（**不能用唱歌录音**）、WAV/MP3/M4A、≥16kHz、≤10MB、无背景音乐/他人声音、≥5 秒连续说话。
+
+**验收**：复刻出一个新 `voice_id`；把 `config.json` 的 `voiceId` 换成它；跑一次 `qq_speak` 试听（或 `tools/tts-batch.mjs --text "..."`）确认新音色生效且自然度改善。
+
+```
+你是 qq-bridge 的 M7 模块负责人（音色复刻换声）。
+先读 docs/guides/VOICE.md 的 §3.5，再读 src/tts-lib.js 的头部注释与 readBailianApiKey。
+工作目录：E:\DSH\qq-bridge-m7（分支 mod/m7-voice-clone，已建好，node_modules 已联接）。
+
+任务：把 TTS 当前「太人机」的音色换成一段真人声音克隆的音色。
+只改 config.json 的 socialV2.voice.tts.voiceId（本地文件，不进 git）；
+可选新增 scripts/clone-voice.mjs 复刻辅助脚本。
+不要碰 src/*、preset、plugins/*（零代码改动）。
+关键事实：百炼 key 已在 ~/.dsh/.credentials.yaml 的 refs.BAILIAN_API_KEY；
+当前 voiceId=cosyvoice-v3.5-plus-xluma-722f1767a5d348869159ac284cce7986；
+复刻接口 voice-enrollment + action=create_voice，需现场验证走 workspace 域名还是 dashscope 老域名。
+样本要求：10~20 秒清晰人声朗读（不能用唱歌录音），WAV/MP3/M4A，≥16kHz，≤10MB。
+交付：新 voice_id + config.json 换好 + 一次试听确认 + 四行汇报；
+不部署、不合并不 push（换音色是本地 config，不进 git；若要提交 clone-voice.mjs 脚本则 commit 到分支）。
+结束前按四行汇报（改了什么 / 试听结果 / 新 voice_id / 等谁下一步）。
+```
+
+**注意**：M7 改的是 `config.json`（.gitignore 本机文件）——这个文件**不进 git**，所以「交付」不是靠 commit config，而是靠「新 voice_id + 试听截图/结果」证明换成功。若写了 `scripts/clone-voice.mjs`，那才需要 commit 到分支供主理人合并。
+
 ---
 
 ## 6. 完成定义（DoD，四个都满足才算完）
@@ -247,6 +290,7 @@ git worktree add ../qq-bridge-m2 -b mod/m2-preset-boundaries
 | M4 | 已完成 | mod/m4-mention-gate | e148c5d | 692 全绿、已合并 | 18:59 随 M3 上线 |
 | M5 | 已完成 | mod/m5-ops-metrics | 841b51c | 三行指标已出 | 24h 观察待补 |
 | M6 | 已完成 | mod/m6-preset-contract | b0b1b76 | 契约 7/7 转绿 | 已合并 main，无需部署 |
+| M7 | 待开工 | mod/m7-voice-clone | — | — | 音色换声，独立泳道 |
 
 状态只允许四种：`待开工` / `进行中` / `待合并` / `已完成`。改状态时顺手写时间。
 
