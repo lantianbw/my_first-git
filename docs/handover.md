@@ -77,7 +77,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\deploy.ps1
 - **deploy.ps1 只覆盖 `src/`**：改 `dsh/agent-presets/<preset>/agent.cordis.yml` 后必须
   ① `node scripts/build-agent-preset-patches.mjs` 重新生成 `plugins/qq-agent-presets/presets/<preset>.patch.yml`，
   ② scp 该 patch 到 `/opt/qq-bridge/plugins/qq-agent-presets/presets/`，
-  ③ `systemctl restart dsh-web`。已有会话的系统提示不重建，**新会话/下次轮换**才用新规则。
+  ③ `systemctl restart dsh-web`。DSH 的系统提示逐轮重组，已有会话在**下一轮**就会用上新规则（2026-10-29 实测主人会话第 4 轮生效），不用等轮换。
 
 ### 3.2 回滚
 
