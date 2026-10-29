@@ -165,12 +165,13 @@ git worktree add ../qq-bridge-m2 -b mod/m2-preset-boundaries
 ```
 你是 qq-bridge 的 M3 模块负责人（记忆与边界档案）。
 先读 docs/trap-hardening-handover.md 第 6 节第 5、9 项，再读 docs/module-ownership.md 的 M3 任务书。
-工作目录：E:\DSH\qq-bridge-m3（分支 mod/m3-memory-risk）。
+工作目录：E:\DSH\qq-bridge-m3（分支 mod/m3-memory-risk，已 fast-forward 到最新 main，含 M1/M2/M5/M6）。
 
 只改 src/memory/*（新建纯函数）、src/content/memory-render.js、src/bridge.js 的记忆段。
-不要碰 src/guards/*、preset（别的模块在用）。
-交付：单测 + 全量不回归 + commit；不部署、不合并。
-结束前按四行汇报。
+不要碰 src/guards/*、preset、src/inbound/*（别的模块在用）。
+基线：node --test tests/*.test.mjs 当前 672，交付时不得低于 672。
+交付：单测 + 全量不回归 + commit；不部署、不合并不 push（合并与部署由主理人对话做）。
+结束前按四行汇报（改了什么 / 测试结果 / commit / 等谁下一步）。
 ```
 
 ### M4 点名与调度
@@ -181,13 +182,15 @@ git worktree add ../qq-bridge-m2 -b mod/m2-preset-boundaries
 
 ```
 你是 qq-bridge 的 M4 模块负责人（点名与调度）。
-先读 docs/module-ownership.md 的 M4 任务书；前置 M2/M3 必须已完成（看 §7 状态表）。
-工作目录：E:\DSH\qq-bridge-m4（分支 mod/m4-mention-gate）。
+先读 docs/module-ownership.md 的 M4 任务书；前置 M2 已完成、M3 必须已合并到 main（看 §7 状态表）。
+**开工前先确认 M3 状态为「已完成」，否则不要动手。**
+工作目录：E:\DSH\qq-bridge-m4（分支 mod/m4-mention-gate）。开工前先 `git merge --ff-only origin/qq-bridge` 拉到最新主干。
 
-只改 src/bridge.js 的 evaluateWakeTriggerV2 一带 + tests；如需话术才动 preset。
-不要碰出站守卫、记忆段。
-交付：单测 + 全量不回归 + commit；不部署、不合并。
-结束前按四行汇报。
+只改 src/bridge.js 的 evaluateWakeTriggerV2 一带 + tests；如需话术才动 preset（改 preset 必须改 dsh/agent-presets/qq-chat-v2/agent.cordis.yml 源，再用 scripts/build-agent-preset-patches.mjs 重建 patch 并 --check，禁止手改 patch）。
+不要碰出站守卫、记忆段、src/inbound/*。
+基线：node --test tests/*.test.mjs 当前 672，交付时不得低于 672。
+交付：单测 + 全量不回归 + commit；不部署、不合并不 push（合并与部署由主理人对话做）。
+结束前按四行汇报（改了什么 / 测试结果 / commit / 等谁下一步）。
 ```
 
 ### M5 运维与审计
@@ -228,7 +231,7 @@ git worktree add ../qq-bridge-m2 -b mod/m2-preset-boundaries
 ## 6. 完成定义（DoD，四个都满足才算完）
 
 1. 只改了自己模块清单里的文件（`git diff --name-only` 自查）；
-2. 全量测试通过（当前基线 **656**），新增单测覆盖验收点；
+2. 全量测试通过（当前基线 **672**：656 起始 + M1 11 + M2 5；跑 `node --test tests/*.test.mjs` 不得低于 672），新增单测覆盖验收点；
 3. 已提交到自己的分支，报告 commit hash；
 4. 没有部署、没有合并、没有重启线上服务。
 
