@@ -372,9 +372,9 @@ git worktree add ../qq-bridge-m2 -b mod/m2-preset-boundaries
 | M5 | 已完成 | mod/m5-ops-metrics | 841b51c | 三行指标已出 | 24h 观察待补 |
 | M6 | 已完成 | mod/m6-preset-contract | b0b1b76 | 契约 7/7 转绿 | 已合并 main，无需部署 |
 | M7 | 待开工 | mod/m7-voice-clone | — | — | 音色换声，独立泳道 |
-| M8 | 待开工 | mod/m8-affection | — | — | 好感度，bridge 泳道 |
-| M9 | 待开工 | mod/m9-think-debounce | — | — | 思维链防抖，preset 泳道 |
-| M10 | 待开工 | mod/m10-profile-probe | — | — | 资料探测，只读 |
+| M8 | 已完成 | mod/m8-affection | 813f52f | 711 全绿、已合并 | 21:50 主理人代劳收尾 |
+| M9 | 已完成 | mod/m9-think-debounce | 7207c00 | 699 全绿、已合并 | 21:47 合并 main |
+| M10 | 已完成 | mod/m10-profile-probe | 24dfece | 脚本就绪、已合并 | 21:47 合并 main |
 
 状态只允许四种：`待开工` / `进行中` / `待合并` / `已完成`。改状态时顺手写时间。
 
