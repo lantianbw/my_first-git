@@ -27,6 +27,8 @@
 | **M8** | 好感度系统 | 功能愿望清单 §1 | `src/memory/*.js`（扩字段）、`src/content/memory-render.js`、`src/bridge.js` **仅记忆段**、`tests/*` | preset、`src/guards/*`、`src/inbound/*` | 无（bridge 泳道，与其它 bridge 模块串行） | 第 4 批 |
 | **M9** | 思维链防抖 | 功能愿望清单 §2 | `dsh/agent-presets/qq-chat-v2/agent.cordis.yml`、`plugins/qq-agent-presets/presets/qq-chat-v2.patch.yml`（生成物）、`tests/*` | `src/*` | 无（preset 泳道） | 第 4 批 |
 | **M10** | QQ 资料管理探测 | 功能愿望清单 §3 | 只读探测 SnowLuma 是否支持改资料（可新增 `scripts/probe-*.mjs`）；**先不改任何功能代码** | `src/*`、preset | 无（只读） | 第 4 批 |
+| **M11** | 能力清单 + 告警通道 | 新需求：她知道自己的功能 / 坏了告诉主人 | `src/bridge.js`（`qq_get_prompt` 加 `capabilities` 返回 + `qq_report_feedback` 真通知 owner）、`src/tools/capabilities.js`（新建，人话能力表）、`tests/*` | preset、`src/guards/*` | 无（bridge 泳道） | 第 5 批 |
+| **M12** | 她的自述话术 | 新需求：问会什么 / 坏了怎么说 | `dsh/agent-presets/qq-chat-v2/agent.cordis.yml`、`plugins/qq-agent-presets/presets/qq-chat-v2.patch.yml`（生成物）、`tests/*` | `src/*` | 无（preset 泳道） | 第 5 批 |
 
 **为什么这么切**：`src/bridge.js` 是唯一热点，M1/M3/M4 都会碰它，所以必须串行；preset 是第二热点，M2/M6 串行；其余文件天然隔离。M7 只动 `config.json`（换 `socialV2.voice.tts.voiceId`）+ 一个复刻辅助脚本，不碰代码泳道与 preset 泳道，天然隔离。M8（bridge）/ M9（preset）/ M10（只读探测）分属三个不同泳道，可并行。
 
@@ -40,6 +42,7 @@ Lane B（提示词 / preset）:      M2 ──→ M6（若改 preset）──→
 Lane C（运维 / 只读）:          M5 ──────────────────→（24h 后出观察结论）
 Lane D（配置 / 运营）:          M7（音色换声，只改 config.json + 复刻脚本，独立）
 Lane E（只读探测）:             M10（QQ 资料管理探测，先不改功能码）
+Lane F（能力自述）:             M11（bridge 能力清单+告警通道）‖ M12（preset 自述话术）
 ```
 
 - **第 1 批（可同时开 3 个对话）**：M1 + M2 + M5
@@ -117,10 +120,17 @@ git worktree add ../qq-bridge-m2 -b mod/m2-preset-boundaries
 
 | 模块 | 工作区 | 分支 | 状态 |
 | --- | --- | --- | --- |
-| M7 | `E:\DSH\qq-bridge-m7` | `mod/m7-voice-clone` | 已完成（ef82a5d，新音色已上线） |
-| M8 | `E:\DSH\qq-bridge-m8` | `mod/m8-affection` | 待开工 |
-| M9 | `E:\DSH\qq-bridge-m9` | `mod/m9-think-debounce` | 待开工 |
-| M10 | `E:\DSH\qq-bridge-m10` | `mod/m10-profile-probe` | 待开工 |
+| M7 | `E:\DSH\qq-bridge-m7` | `mod/m7-voice-clone` | 已完成（ef82a5d，新音色已上线，worktree 已清理） |
+| M8 | `E:\DSH\qq-bridge-m8` | `mod/m8-affection` | 已完成（813f52f，已合并，worktree 已清理） |
+| M9 | `E:\DSH\qq-bridge-m9` | `mod/m9-think-debounce` | 已完成（7207c00，已合并，worktree 已清理） |
+| M10 | `E:\DSH\qq-bridge-m10` | `mod/m10-profile-probe` | 已完成（24dfece，已合并，worktree 已清理） |
+
+**第 4 批工作区已建好：**
+
+| 模块 | 工作区 | 分支 | 状态 |
+| --- | --- | --- | --- |
+| M11 | `E:\DSH\qq-bridge-m11` | `mod/m11-capabilities` | 待开工 |
+| M12 | `E:\DSH\qq-bridge-m12` | `mod/m12-self-report` | 待开工 |
 
 所有工作区的 `node_modules` 已用目录联接指向主干仓库，可直接跑测试/构建。
 
@@ -350,12 +360,84 @@ git worktree add ../qq-bridge-m2 -b mod/m2-preset-boundaries
 结束前按四行汇报（改了什么 / 探测结论 / commit / 等谁下一步）。
 ```
 
+### M11 能力清单 + 告警通道（bridge）
+
+**目标**：① 让 `qq_get_prompt` 返回**人话能力清单**（她能被问「你会什么」时说清楚）；② 让 `qq_report_feedback(level='error')` **真的私聊 owner**（现在只记日志，没发出去）。
+
+**背景事实（已核实，别再查）**：
+- `qq_get_prompt`（`src/bridge.js` 约 5410–5480）已有 `toolMap`（flag → 工具名）与 `enabledTools` 数组（已按 `tools[flag] !== false` 过滤）。**数据源齐了，缺人话描述。**
+- `v2ToolEnabled(flag)`（约 3737）= `cfg.socialV2?.tools?.[flag] !== false`，即「没写 = 开」。
+- 表情包工具有额外闸门 `stickerEnabled()`（`stickerToolFlags` 那组）。
+- `qq_report_feedback` 落点约 7260–7285；**关键缺口在 7277**：
+  ```js
+  if (cfg.socialV2?.feedback?.notifyOwnerOnError && level === 'error' && cfg.ownerQQ) {
+    log(`[reserved2] 错误级反馈，可通知 owner ${cfg.ownerQQ}（当前仅记录日志）`);
+  }
+  ```
+  已有频率限制（5 次/分钟、20 次/小时）、`appendFeedbackEntry`、`appendActivity`。
+- owner 私聊发消息用 `sendToQQ(\`private:${cfg.ownerQQ}\`, ...)`（参考 `runHealthCheckV2` 约 12280 行的用法）。
+
+**接口（已钉死，M12 会引用，不要改字段名）**：
+- `qq_get_prompt` 返回新增 `capabilities: Array<{ name: string, desc: string, enabled: boolean, why?: string }>`
+  - `name`：人话能力名（如「发语音」）
+  - `desc`：一句话人话说明（如「把一句话合成语音发出去」，**不要写工具名**）
+  - `enabled`：是否可用
+  - `why`：不可用时给原因（如「语音发送未开启」「表情包体系已关闭」）
+- `qq_report_feedback({ key, level: 'error', message })` → 服务端私聊 owner，内容形如 `【她的报告】<会话>：<message>`；**带冷却**（同一 key 同一 message 10 分钟内只发一次，防刷屏）
+
+**验收**：`capabilities` 出现在 `qq_get_prompt` 返回里且字段符合上面形状；`level='error'` 时真的发出私聊；同一条 10 分钟内不重复发；单测覆盖能力表生成（开/关/为什么关）与告警冷却。
+
+```
+你是 qq-bridge 的 M11 模块负责人（能力清单 + 告警通道，bridge 泳道）。
+先读 docs/module-ownership.md 的 M11 任务书，再读 src/bridge.js 的 toolMap/enabledTools（约 5410-5480）、v2ToolEnabled（约 3737）、qq_report_feedback（约 7260-7285）、runHealthCheckV2 里 sendToQQ 用法（约 12280）。
+工作目录：E:\DSH\qq-bridge-m11（分支 mod/m11-capabilities，已建好，node_modules 已联接）。
+
+任务：
+1. qq_get_prompt 返回新增 capabilities 数组，字段钉死 { name, desc, enabled, why? }——name/desc 用人话，不要出现 qq_ 工具名。
+2. qq_report_feedback 的 level='error' 真正私聊 owner（现在只记日志）；加 10 分钟同内容冷却。
+只改 src/bridge.js（这两处）+ 可新增 src/tools/capabilities.js（人话能力表）+ tests/*。
+不要碰 preset、src/guards/*（别的模块在用）。
+基线：node --test tests/*.test.mjs 当前 711，交付时不得低于 711。
+交付：单测 + 全量不回归 + commit；不部署、不合并不 push。
+结束前按四行汇报（改了什么 / 测试结果 / commit / 等谁下一步）。
+```
+
+### M12 她的自述话术（preset）
+
+**目标**：教她两件事——① 被问「你会什么 / 有什么功能」时，用**人话**答能力，不背工具名、不说实现；② 工具调用失败/发现功能坏了时，判断是否该上报，用 `qq_report_feedback(level='error')` 告诉主人；对群友只说「弄不出来」，对主人说结果。
+
+**背景事实（已核实，别再查）**：
+- preset 源 `dsh/agent-presets/qq-chat-v2/agent.cordis.yml` 已有【被问技术：一句就够】段落（约 97–103 行），其中**已有**这条：
+  > 例外只有老爹本人在私聊里问"能不能用/坏没坏"：只说结果（能用 / 发不出去，说太频繁了），不说实现，也不念报错原文。
+  → **话术边界已存在，M12 是在它基础上补「主动上报」与「能力自述」。**
+- M11 会提供：`qq_get_prompt` 返回 `capabilities: [{ name, desc, enabled, why? }]`；`qq_report_feedback(level='error')` 会私聊 owner。
+- 生成物 `plugins/qq-agent-presets/presets/qq-chat-v2.patch.yml` **禁止手改**，改源后 `node scripts/build-agent-preset-patches.mjs` 重建并 `--check`。
+- preset 契约 `scripts/test-qq-preset-contract.mjs` 现 7/7 绿，不能回归。
+
+**验收**：preset 新增段落覆盖「能力自述」与「故障上报」两条；不破坏【被问技术：一句就够】的既有边界；patch `--check` 通过；契约仍 7/7；全量不回归。
+
+```
+你是 qq-bridge 的 M12 模块负责人（她的自述话术，preset 泳道）。
+先读 docs/module-ownership.md 的 M12 任务书，再读 dsh/agent-presets/qq-chat-v2/agent.cordis.yml 的【被问技术：一句就够】段落（约 97-103 行，已有"只对老爹私聊说结果"的边界）。
+工作目录：E:\DSH\qq-bridge-m12（分支 mod/m12-self-report，已建好，node_modules 已联接）。
+
+任务：
+1. 能力自述：被问"你会什么/有什么功能"时，用 qq_get_prompt 返回的 capabilities 用人话答（"会发语音、会发表情包，语音发送现在没开"），不背 qq_ 工具名、不说实现。
+2. 故障上报：工具调用失败或发现功能坏了，判断是否故障 → 用 qq_report_feedback(level='error', message=人话描述) 告诉主人；对群友只说"弄不出来"，不念报错原文；同一次故障不要反复报。
+只改 dsh/agent-presets/qq-chat-v2/agent.cordis.yml（源）+ 生成物 patch + tests/*。
+不要碰 src/*（bridge 泳道是 M11 在改）。
+改源后必须 node scripts/build-agent-preset-patches.mjs 然后 --check 通过；禁止手改 patch。
+基线：node --test tests/*.test.mjs 当前 711，交付时不得低于 711；preset 契约保持 7/7 绿。
+交付：preset 改动 + patch --check 过 + 单测不回归 + commit；不部署、不合并不 push。
+结束前按四行汇报（改了什么 / 测试结果 / commit / 等谁下一步）。
+```
+
 ---
 
 ## 6. 完成定义（DoD，四个都满足才算完）
 
 1. 只改了自己模块清单里的文件（`git diff --name-only` 自查）；
-2. 全量测试通过（当前基线 **692**：656 起始 + M1 11 + M2 5 + M3 11 + M4 9；跑 `node --test tests/*.test.mjs` 不得低于 692），新增单测覆盖验收点；
+2. 全量测试通过（当前基线 **711**：656 起始 + M1 11 + M2 5 + M3 11 + M4 9 + M8 12 + M9 7；跑 `node --test tests/*.test.mjs` 不得低于 711），新增单测覆盖验收点；
 3. 已提交到自己的分支，报告 commit hash；
 4. 没有部署、没有合并、没有重启线上服务。
 
@@ -375,6 +457,8 @@ git worktree add ../qq-bridge-m2 -b mod/m2-preset-boundaries
 | M8 | 已完成 | mod/m8-affection | 813f52f | 711 全绿、已合并 | 21:50 主理人代劳收尾 |
 | M9 | 已完成 | mod/m9-think-debounce | 7207c00 | 699 全绿、已合并 | 21:47 合并 main |
 | M10 | 已完成 | mod/m10-profile-probe | 24dfece | 脚本就绪、已合并 | 21:47 合并 main |
+| M11 | 待开工 | mod/m11-capabilities | — | — | 能力清单+告警通道，bridge |
+| M12 | 待开工 | mod/m12-self-report | — | — | 自述话术，preset |
 
 状态只允许四种：`待开工` / `进行中` / `待合并` / `已完成`。改状态时顺手写时间。
 
