@@ -124,6 +124,8 @@ import { createRateLimiter } from './outbound/rate.js';
 // 名字改成 normalizeSegments：它不再直接返回字符串，而是 { ok } 结果 —— 契约 D 表要求
 // inbound/segments fail closed，归一失败只丢这一条消息，所以 ok 的判断必须留在调用点。
 import { segmentsToText as normalizeSegments, extractMediaFromSegments, sanitizeMediaSummary } from './inbound/segments.js';
+// inbound/message 影子（契约 docs/inbound-message-dto.md）：只比媒体归一，不改变行为。
+import { sanitizeMediaList } from './inbound/message.js';
 import { isAllowed } from './auth/allow.js';
 import { judgeHealth } from './observability/health.js';
 import { summarize as summarizeActivity } from './observability/activity.js';
@@ -1539,6 +1541,8 @@ function allowShadowCompare(kind, id, cfg, allowList, result) {
 // 真实 QQ 号 / 群号都是 10~11 位，两种实现结果相同；差异只存在于不现实的超长数字输入。
 // session/router 影子只对每个 key 比一次：同类 key 的分歧原因相同，重复打日志没有价值。
 const routerShadowChecked = new Set();
+// inbound/message 影子同理：每个 key 只比一次媒体归一。
+const inboundShadowChecked = new Set();
 let routerShadowAnnounced = false;
 function canonicalV2Key(key) {
   const parsed = parseKey(key);
@@ -13564,6 +13568,33 @@ async function main() {
       if (m?.subType) item.subType = String(m.subType);
       return item;
     }).filter((m) => (m.kind === 'face' ? !!m.faceId : !!(m.file || m.url || m.emojiId))) : [];
+    // ── inbound/message 影子：只比"两边都有的字段"，不改行为 ────────────────────
+    // 新模块按契约会多带 emojiPackageId/emojiKey（现持久化会丢），所以不能整对象比对，
+    // 否则永远"分歧"。这里只投影共有字段，等价性才说明得清。
+    if (!inboundShadowChecked.has(key)) {
+      inboundShadowChecked.add(key);
+      try {
+        const project = (m) => JSON.stringify({
+          kind: m?.kind ?? null,
+          file: m?.file ?? null,
+          url: m?.url ?? null,
+          faceId: m?.faceId ?? null,
+          emojiId: m?.emojiId ?? null,
+          subType: m?.subType ?? null,
+          summary: m?.summary ?? null
+        });
+        const shadowList = sanitizeMediaList(media);
+        const shadowText = JSON.stringify(shadowList.map((m) => JSON.parse(project(m))));
+        const currentText = JSON.stringify(safeMedia.map((m) => JSON.parse(project(m))));
+        if (shadowText !== currentText) {
+          log(`[inbound/message] 影子不一致：现实现=${currentText} 模块=${shadowText}（key=${key}）`);
+        } else {
+          log(`[inbound/message] 影子已接入（首条 key=${key}，媒体 ${safeMedia.length} 项，与模块一致）`);
+        }
+      } catch (error) {
+        log(`[inbound/message] 影子异常：${error?.message ?? error}（key=${key}）`);
+      }
+    }
     const safeForwardIds = (Array.isArray(forwardIds) ? forwardIds : []).map(sanitizeForwardId).filter(Boolean);
     if (safeForwardIds.length) {
       let set = seenForwardIds.get(key);
