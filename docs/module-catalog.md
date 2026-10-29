@@ -88,7 +88,7 @@
 
 | 模块 | 状态 | 接线 | 职责 | 位置 |
 | --- | --- | --- | --- | --- |
-| `outbound/send` | 需合并 | **已上线（部分）** | 发送通道：单行化、超长拆分、OneBot 发送；本批只接了单行化 | `src/outbound/send.js`（`singleLineForQQ`）；`splitLongSegment` 因老测试 eval 源码未动 |
+| `outbound/send` | 需合并 | **已上线** | 发送通道：单行化、超长拆分（URL 占位符保护 + 代理对不切断）、OneBot 发送 | `src/outbound/send.js`（`singleLineForQQ` / `splitLongSegment` / `prepareOutboundText`）；中枢只剩一行委托 |
 | `outbound/batch` | 需合并 | **已上线** | 分条节奏：fixed / byLength / auto 三种间隔算法 + 上下界夹取 | `src/outbound/batch.js`（`computeGaps` / `clampGap`） |
 | `outbound/recheck` | 需合并 | **已上线** | 发送前复核：静默模式是否该拦、哪些会话要审计 | `src/outbound/recheck.js`（`shouldBlockSilentReply` / `shouldAuditKey`） |
 
