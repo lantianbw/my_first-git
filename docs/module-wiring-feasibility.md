@@ -168,6 +168,11 @@
 `lifecycle/lock` 的旧实现（commit `9153468` 的 API `judgeLock`/`adopt`）已被新契约版本覆盖；
 全仓无任何 import，需要考古时 `git show 9153468:src/lifecycle/lock.js`。
 
+> **2026-10-29 追加：** 上表里已有文件的 4 个（`session/store`、`session/social-state`、
+> `session/lifecycle`、`lifecycle/lock`）连同测试**已从仓库删除**（单测 652 → 568，全绿）。
+> 需要找回任意一个：`git show 991a809:src/session/store.js`（以此类推）。
+> 判定理由不变，删除只是清理占位，不改任何线上行为。
+
 #### D.3 新增两条判断口径
 
 - 会**改变既有判定语义**（哪怕只差一个边界比较符）→ 不接

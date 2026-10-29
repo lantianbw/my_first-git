@@ -13,7 +13,7 @@
 | 位置 | 实际文件，或中枢里的函数名（行号会漂移，按函数名搜） |
 
 汇总：运行时 48（A.1~A.12）+ 内容 15（A.13/A.14）= **63**。
-当前：**已上线 15 · 灰度 1 · 不切 8 · 未动 7 · 未接线 1 · 待新建 2 · 其余早已在跑**。
+当前：**已上线 15 · 灰度 1 · 不切 4 · 已移除 4 · 未动 7 · 未接线 1 · 待新建 2 · 其余早已在跑**（2026-10-29 删除了 4 个"不切"模块的文件与测试）。
 
 ---
 
@@ -22,7 +22,7 @@
 | 模块 | 状态 | 接线 | 职责 | 位置 |
 | --- | --- | --- | --- | --- |
 | `lifecycle/boot` | 需合并 | 不切 | 进程装配根：读配置、起控制台、连 DSH/SnowLuma、注册信号 | `main()` |
-| `lifecycle/lock` | 需合并 | 不切 | 单实例锁：无锁→create、指向存活进程→refuse(exit 2)、已死/过期→takeover | `LOCK_FILE` / `acquireLock` / `releaseLock`；模块 `src/lifecycle/lock.js`（13 单测） |
+| `lifecycle/lock` | 需合并 | 已移除 | 单实例锁：无锁→create、指向存活进程→refuse(exit 2)、已死/过期→takeover | `LOCK_FILE` / `acquireLock` / `releaseLock`（模块文件与 13 条测试已删，见 git `991a809` 前） |
 | `lifecycle/shutdown` | 需合并 | 不切 | 优雅退出编排（当前 systemd 直接 SIGTERM，模块无落点） | SIGINT/SIGTERM/uncaughtException 钩子 |
 | `lifecycle/onebot-retry` | 已存在 | 已上线 | OneBot 断线重连状态机，退避 5s→15s→60s→300s 永不放弃 | `src/onebot-retry.js` |
 
@@ -41,10 +41,10 @@
 
 | 模块 | 状态 | 接线 | 职责 | 位置 |
 | --- | --- | --- | --- | --- |
-| `session/store` | 需合并 | 不切 | 会话映射与策略持久化（读失败 → 只读不写，绝不回写覆盖） | `loadState` / `saveState`；模块 `src/session/store.js` |
-| `session/social-state` | 需合并 | 不切 | 仿真状态真源：话题、最近消息、未读水位、唤醒配置 | `getSocialV2State` / `loadSocialV2State` / `saveSocialV2State`；模块 `src/session/social-state.js` |
+| `session/store` | 需合并 | 已移除 | 会话映射与策略持久化（读失败 → 只读不写，绝不回写覆盖） | `loadState` / `saveState`（模块文件已删） |
+| `session/social-state` | 需合并 | 已移除 | 仿真状态真源：话题、最近消息、未读水位、唤醒配置 | `getSocialV2State` / `loadSocialV2State` / `saveSocialV2State`（模块文件已删） |
 | `session/router` | 已存在 | **未接线** | 会话键规范化与路由：决定"这个会话用哪个 preset/权限" | `src/core/session-router.mjs`（全仓 0 import） |
-| `session/lifecycle` | 需合并 | 不切 | 轮换/退役/重建：超龄 + 空闲 → 归档旧会话并重建 | `shouldRotateSession` / `ensureSession` / `retireSession` / `reconcileSessionPolicies`；模块 `src/session/lifecycle.js`（10 单测） |
+| `session/lifecycle` | 需合并 | 已移除 | 轮换/退役/重建：超龄 + 空闲 → 归档旧会话并重建 | `shouldRotateSession` / `ensureSession` / `retireSession` / `reconcileSessionPolicies`（模块文件与 10 条测试已删） |
 
 ## A.4 入站归一 inbound（5）
 
