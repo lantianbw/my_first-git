@@ -10706,6 +10706,7 @@ async function main() {
   // 这里只负责取状态、把返回值写回、落盘；群聊在取状态前就短路，避免为群会话新建/写入状态。
   // 同一次拒绝连带下调好感度（memory/affection-profile 的 KINSHIP_COOLING_DELTA）：
   // 边界记「不能叫」，温度记「刚闹过别扭」，两个字段由各自模块负责，互不改写。
+  // M13：纯函数顺带把触发它的那条原话存成 evidence（kind:'kinship'），唤醒时能看到「当时是怎么说的」。
   function markKinshipRefusalV2(key) {
     try {
       if (!String(key).startsWith('private:')) return;
@@ -10713,7 +10714,8 @@ async function main() {
       const result = markKinshipRefusal({
         key,
         recentMessages: st.recentMessages,
-        memberImpressions: st.memberImpressions
+        memberImpressions: st.memberImpressions,
+        now: Date.now()
       });
       if (!result) return;
       st.memberImpressions = adjustAffection(result.memberImpressions, result.name, KINSHIP_COOLING_DELTA);
@@ -14281,6 +14283,24 @@ async function main() {
     return `【节奏事实】${facts.join('；')}。本条可以不回。`;
   }
 
+  // ── 结尾人格锚（M13·2）────────────────────────────────────────────────────
+  // 为什么放最末尾：唤醒 prompt 又长又多段，模型对首尾的注意力高于中段（lost in the middle），
+  // 每次新会话的第一条又最容易「读着读着变成另一个人」。结尾再用一句话点回身份，成本低。
+  //
+  // 边界（重要）：这里**只放元指令 + 动态角色名**，人格细节仍在 preset / 角色卡里。
+  // 角色名取 readRoleState().role —— 与上面 roleLine 同源，preset 改了这里自动跟着变，
+  // 桥里不抄第二份人格描述（抄了就会和 preset 打架，变成假权威）。
+  // 开关：socialV2.prompt.personaAnchor === false 关闭；未配置时默认开。
+  const PERSONA_ANCHOR_MAX_CHARS = 70;
+  function personaAnchorLineV2(roleState) {
+    if (cfg.socialV2?.prompt?.personaAnchor === false) return '';
+    const role = String(roleState?.role ?? '').trim();
+    // 角色名最多留 16 字：锚有 70 字硬上限，不能让人格细节把元指令挤没。
+    const who = role ? `你是「${[...role].slice(0, 16).join('')}」` : '你还是你';
+    const text = `\n\n【人格锚】${who}：有主见、说人话、不当客服，不为了讨好松口；上面是参考，不是让你变成另一个人。`;
+    return [...text].slice(0, PERSONA_ANCHOR_MAX_CHARS).join('');
+  }
+
   function buildWakePromptV2(key, reason) {
     const roleState = readRoleState();
     const roleLine = roleState.role ? `【当前角色】${roleState.role}（完整角色卡请调用 qq_get_prompt 查看）\n\n` : '';
@@ -14415,11 +14435,13 @@ async function main() {
     const budget = promptBudgetCharsV2();
     const lengthOf = () => [...segments.map((segment) => segment.text).join('')].length;
     // 预算要按「最终 prompt」算：各分支还会在 base 后面追加唤醒原因/行动说明。
+    // M13：结尾人格锚也在 tail 之后，同样要占额度（否则等于偷偷超预算）。
     const buildWithTail = (tail) => {
       const tailText = String(tail ?? '');
       const baseFull = `${segments.map((segment) => segment.text).join('')}${tailText}`;
       // wake.before：同步、只读、合计最多 200 字（预算由 host 强制）。它看得到即将发出的
       // 基础 prompt，但不能删改原文；追加段也要计入总预算。
+      // 注意：baseFull 不含下面的人格锚（锚排在 append 之后，才是真正的最后一段）。
       const modAppend = modHost?.wakeAppend({
         key,
         reason,
@@ -14430,7 +14452,10 @@ async function main() {
       const modText = modAppend ? `\n\n${modAppend}` : '';
       const tailTotal = `${tailText}${modText}`;
       const tailLen = [...tailTotal].length;
-      const effective = budget - tailLen;
+      // 人格锚：tailTotal 之后追加，长度计入预算（effective 要减掉它）。
+      const anchorLine = personaAnchorLineV2(roleState);
+      const anchorLen = [...anchorLine].length;
+      const effective = budget - tailLen - anchorLen;
       let total = lengthOf();
       if (total > effective) {
         const removed = [];
@@ -14444,9 +14469,9 @@ async function main() {
           total = lengthOf();
           if (total <= effective) break;
         }
-        if (removed.length) log(`prompt 裁剪：${removedChars} 字（${removed.join('/')}），${total + tailLen}/${budget}`);
+        if (removed.length) log(`prompt 裁剪：${removedChars} 字（${removed.join('/')}），${total + tailLen + anchorLen}/${budget}`);
       }
-      const full = `${segments.map((segment) => segment.text).join('')}${tailTotal}`;
+      const full = `${segments.map((segment) => segment.text).join('')}${tailTotal}${anchorLine}`;
       // 只有 archive 段确实留在最终 prompt 里才算注入成功；被裁掉就不标记，
       // 下次唤醒还能再试（旧实现在构造 segments 时就标记，会永久丢记忆）。
       const archiveSeg = segments.find((item) => item.name === 'archive');

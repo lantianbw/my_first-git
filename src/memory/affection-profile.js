@@ -20,6 +20,12 @@
 //
 // 为什么用有符号分而不是 0~100：关系是双向的，被反复施压会往下走（见 KINSHIP_COOLING_DELTA），
 // 0 作为「陌生人/一般」的中点比「50」更好读，也不依赖误以为的初始好感。
+//
+// M13 原话证据：adjustAffection 的第 4 个参数可以带「语境」（字符串或 { quote, at, key }），
+// 有语境时给这条印象追加 kind:'affection' 的 evidence，让温度变化可回溯到当时那句话。
+// 不带语境时行为与 M8 完全一致（不写 evidence、不补默认值）。
+
+import { appendEvidence, normalizeEvidenceQuote } from './risk-profile.js';
 
 export const spec = Object.freeze({
   name: 'memory/affection-profile',
@@ -163,12 +169,16 @@ export function setAffection(memberImpressions, name, score) {
  * @pure 好感度增减（delta 可正可负），结果夹在 -100~100，保留已有标签。
  * 名字非法 / delta 非有限数时返回原样拷贝。
  *
+ * 第 4 个参数 context 可选：传字符串或 { quote, at, key } 时，把这句话存成
+ * kind:'affection' 的原话证据（最多 3 条、同句去重、新的在前）；不传则行为不变。
+ *
  * @param {object} [memberImpressions]
  * @param {string} name
  * @param {number} delta
+ * @param {string | { quote?: string, text?: string, at?: number, key?: string }} [context]
  * @returns {object} 新的 memberImpressions 表（浅拷贝，只替换目标条目）
  */
-export function adjustAffection(memberImpressions, name, delta) {
+export function adjustAffection(memberImpressions, name, delta, context) {
   const target = trimText(name);
   const impressions = (memberImpressions && typeof memberImpressions === 'object') ? memberImpressions : {};
   const next = { ...impressions };
@@ -177,10 +187,22 @@ export function adjustAffection(memberImpressions, name, delta) {
 
   const old = next[target] || {};
   const current = normalizeAffection(old.affection);
-  next[target] = {
+  const entry = {
     ...old,
     affection: { score: clampScore(current.score + Number(delta)), tags: current.tags }
   };
+  const quote = normalizeEvidenceQuote(
+    typeof context === 'string' ? context : (context?.quote ?? context?.text ?? '')
+  );
+  if (quote) {
+    entry.evidence = appendEvidence(old.evidence, {
+      quote,
+      at: Number(context?.at) || Number(context?.time) || 0,
+      key: typeof context?.key === 'string' ? context.key : '',
+      kind: 'affection'
+    });
+  }
+  next[target] = entry;
   return next;
 }
 

@@ -14,6 +14,7 @@
 
 import { rank as rankMemories } from './memory-score.js';
 import { hasAffection, normalizeAffection, describeAffection } from '../memory/affection-profile.js';
+import { latestEvidenceQuote, EVIDENCE_KINDS } from '../memory/risk-profile.js';
 
 export const spec = Object.freeze({
   name: 'content/memory-render',
@@ -33,9 +34,14 @@ function minutesAgo(now, at) {
   return Math.round((now - n) / 60000);
 }
 
+/** 风险结论对应的证据类型：称呼 / 下套 / 话题（affection 归好感度那一段）。 */
+const RISK_EVIDENCE_KINDS = Object.freeze(EVIDENCE_KINDS.filter((kind) => kind !== 'affection'));
+
 /**
  * @pure 把一条印象的风险档案（risk.trapHappy / noGoTopics / refusedTitles）拼成印象行末尾的说明。
  * 没有风险信息返回空串；只有旧字段 noKinshipTitle 时退回旧文案，保证老数据渲染不变。
+ * 有原话证据且最新一条属于风险类结论时，末尾再追一句（原话：「…」）；
+ * 只给最近 1 条，没有 evidence 的老数据不追加任何东西。
  */
 function renderRiskNotes(im) {
   const risk = im && im.risk && typeof im.risk === 'object' ? im.risk : {};
@@ -53,20 +59,24 @@ function renderRiskNotes(im) {
   } else if (im && im.noKinshipTitle === true) {
     notes.push('边界：不叫亲属称呼，用名字或「你」');
   }
-  return notes.length ? `（${notes.join('；')}）` : '';
+  if (!notes.length) return '';
+  const quote = latestEvidenceQuote(im?.evidence, RISK_EVIDENCE_KINDS);
+  return `（${notes.join('；')}）${quote ? `（原话：「${quote}」）` : ''}`;
 }
 
 /**
  * @pure 把一条印象的好感度（affection.score / affection.tags）拼成印象行末尾的说明。
  * 没写过好感度返回空串（不给没记录的人凭空补「一般」，保证老数据渲染不变）。
  * 档位文案由 memory/affection-profile 决定，本模块只管排版。
+ * 最新一条证据是 affection 类时，末尾追一句（原话：「…」），只给最近 1 条。
  */
 function renderAffectionNote(im) {
   if (!hasAffection(im)) return '';
   const { score, tags } = normalizeAffection(im.affection);
   const label = describeAffection(score);
   const tagPart = tags.length ? `；关系标签：${tags.join('、')}` : '';
-  return `（好感度 ${score}·${label}${tagPart}）`;
+  const quote = latestEvidenceQuote(im?.evidence, ['affection']);
+  return `（好感度 ${score}·${label}${tagPart}）${quote ? `（原话：「${quote}」）` : ''}`;
 }
 
 /**
