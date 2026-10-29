@@ -18,6 +18,7 @@
     "accessToken": "",
     "followDiscoveredEndpoint": true,
     "silenceWarnMs": 600000,
+    "goodFalseGraceMs": 600000,
     "launcherPath": "",
     "homeDir": ""
   },

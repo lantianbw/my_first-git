@@ -170,6 +170,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     requestForwardV2, decideForwardApprovalV2, forwardSettings, loadForwardApprovals,
     enrichIncomingMediaV2, decorateForwardMediaOcr, ocrImageText, pttTextFor, mediaConfig, shouldAutoPtt,
     refreshMode, modeAllowed, trackTurnEvent, replayPendingWakeReasonsV2,
+    snowlumaHealth, noteReceiveHealth, snowlumaHealthSnapshot, reportSnowlumaHealth,
     collectors, setupSleepTimerV2,
     getInitialPrompt, setInitialPrompt, loadInitialPrompts, formatInitialPromptV2,
     initialPrompts, initialPromptMaxChars, promptBudgetCharsV2,

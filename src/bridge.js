@@ -129,7 +129,7 @@ import { segmentsToText as normalizeSegments, extractMediaFromSegments, sanitize
 // inbound/message 影子（契约 docs/inbound-message-dto.md）：只比媒体归一，不改变行为。
 import { sanitizeMediaList } from './inbound/message.js';
 import { isAllowed } from './auth/allow.js';
-import { judgeHealth } from './observability/health.js';
+import { judgeHealth, snowlumaSnapshot } from './observability/health.js';
 import { summarize as summarizeActivity } from './observability/activity.js';
 import { createCappedLogger, formatLine, localClock as localClockImpl } from './obs/log.js';
 import { singleLineForQQ as singleLineForQQImpl, splitLongSegment as splitLongSegmentImpl } from './outbound/send.js';
@@ -3621,6 +3621,9 @@ async function main() {
   //      阈值取很宽，措辞必须留余地。
   const SNOWLUMA_STATUS_POLL_MS = 60_000;
   const SNOWLUMA_SILENCE_WARN_MS = Math.max(60_000, Number(cfg.snowluma?.silenceWarnMs) || 10 * 60_000);
+  // SnowLuma 的 Hook 在 105 秒无 QQ 报文时就会短暂报 good=false。只有同一段 false
+  // 连续持续这个宽限期，才算真正的接收链路故障；短抖动仅标 suspect，不告警。
+  const SNOWLUMA_GOOD_FALSE_GRACE_MS = Math.max(60_000, Number(cfg.snowluma?.goodFalseGraceMs) || 10 * 60_000);
   const snowlumaHealth = {
     lastPacketAt: 0,      // 最近一个来自 SnowLuma 的事件包（含 meta/心跳）
     lastPacketKind: '',
@@ -3629,6 +3632,7 @@ async function main() {
     goodSource: '',       // 'heartbeat' | 'get_status' —— 便于诊断"这条判断从哪来"
     goodError: '',
     goodCheckedAt: 0,
+    goodFalseSince: 0,    // 本段 good=false 的起始时间；good=true 时立即清零
     degraded: false,      // 当前是否处于"已告警"状态（边沿触发，避免刷屏）
     reason: '',
   };
@@ -3642,45 +3646,27 @@ async function main() {
   /** 记下一次接收链路健康度。@param good - boolean；非布尔值忽略。 */
   function noteReceiveHealth(good, source) {
     if (typeof good !== 'boolean') return;
+    const now = Date.now();
+    if (good === false) {
+      if (!snowlumaHealth.goodFalseSince) snowlumaHealth.goodFalseSince = now;
+    } else {
+      // 短暂 false 只要被下一次心跳/轮询纠正，就永远不会进入持续告警计时。
+      snowlumaHealth.goodFalseSince = 0;
+    }
     snowlumaHealth.good = good;
     snowlumaHealth.goodSource = source;
     snowlumaHealth.goodError = '';
-    snowlumaHealth.goodCheckedAt = Date.now();
+    snowlumaHealth.goodCheckedAt = now;
   }
 
-  /** 供 /api/status 与控制台使用的只读快照。 */
+  /** 供 /api/status 与控制台使用的只读快照（判定纯函数在 observability/health）。 */
   function snowlumaHealthSnapshot() {
-    const now = Date.now();
-    const agoMs = snowlumaHealth.lastPacketAt ? now - snowlumaHealth.lastPacketAt : null;
-    const silent = snowlumaHealth.lastPacketAt > 0 && agoMs > SNOWLUMA_SILENCE_WARN_MS;
-    // 只有 SnowLuma **明确自报** good=false 才算"确认坏了"（接收链路）。
-    // 「静默」只能说明连它的进程/WS 都没动静了 —— 那是**另一个**故障面，措辞必须分开。
-    const confirmed = snowlumaHealth.good === false;
-    let hint = null;
-    if (confirmed) {
-      hint = 'SnowLuma 自报接收链路异常（good=false）：它的 [Hook] 收不到 QQ 客户端的数据，'
-        + '消息进不来。这不是桥接的问题。请查看 SnowLuma 的 logs/snowluma-*.log 里的 [Hook] 行'
-        + '（receive path stale / process enumeration timed out），并考虑升级 SnowLuma。';
-    } else if (silent) {
-      hint = `已连接但 ${Math.round(agoMs / 60000)} 分钟没有收到任何事件包（连 30 秒一次的心跳都没有）。`
-        + '这说明 SnowLuma 的 OneBot 服务/进程本身可能已经卡住或不在了，而不只是收不到 QQ 数据；'
-        + '请直接查看 SnowLuma 的 logs/snowluma-*.log。';
-    }
-    return {
-      // 只读 snowlumaHealth.connected（由 bot 的 open/close 维护），**不要**在这里引用
-      // `bot`：它在本闭包里声明得晚得多（`const`，TDZ），一旦有人把本函数提前调用就会
-      // 抛 "Cannot access 'bot' before initialization"。
-      connected: snowlumaHealth.connected,
-      accountOnline: snowlumaHealth.accountOnline,
-      good: snowlumaHealth.good,
-      goodSource: snowlumaHealth.goodSource || null,
-      goodError: snowlumaHealth.goodError || null,
-      lastPacketAgoMs: agoMs,
-      lastPacketKind: snowlumaHealth.lastPacketKind || null,
-      silent,
-      degraded: confirmed || silent,
-      hint,
-    };
+    // 只读 snowlumaHealth 的副本；不要在这里引用 `bot`（声明更晚，存在 TDZ）。
+    return snowlumaSnapshot(snowlumaHealth, {
+      now: Date.now(),
+      silenceWarnMs: SNOWLUMA_SILENCE_WARN_MS,
+      goodFalseGraceMs: SNOWLUMA_GOOD_FALSE_GRACE_MS
+    });
   }
 
   /** 边沿触发地告警/恢复，避免每轮探测都刷一行日志。 */

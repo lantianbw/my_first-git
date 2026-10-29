@@ -236,6 +236,18 @@ const SNOWLUMA_CONFIRMED_HINT = 'SnowLuma 自报接收链路异常（good=false�
   + '消息进不来。这不是桥接的问题。请查看 SnowLuma 的 logs/snowluma-*.log 里的 [Hook] 行'
   + '（receive path stale / process enumeration timed out），并考虑升级 SnowLuma。';
 
+/**
+ * SnowLuma 的 Hook 看门狗在 105 秒没有 QQ 报文时就翻 `good=false`，这是它的固定设计，
+ * 不代表接收链路真的坏了。桥接不能把每个空闲窗口都报成故障，因此要求同一段 false
+ * 连续持续 grace 时间才升级为 degraded；短抖动只标 suspect。
+ */
+const DEFAULT_GOOD_FALSE_GRACE_MS = 10 * 60 * 1000;
+const MIN_GOOD_FALSE_GRACE_MS = 60 * 1000;
+
+const snowlumaSuspectHint = (seconds, graceMinutes) => `SnowLuma 自报接收链路静默 ${seconds} 秒，`
+  + `尚未达到持续 ${graceMinutes} 分钟阈值（它的 Hook 在 105 秒无 QQ 报文时会短暂报 false，常见于空闲）；`
+  + '继续观察，不告警。';
+
 const snowlumaSilentHint = (minutes) => `已连接但 ${minutes} 分钟没有收到任何事件包（连 30 秒一次的心跳都没有）。`
   + '这说明 SnowLuma 的 OneBot 服务/进程本身可能已经卡住或不在了，而不只是收不到 QQ 数据；'
   + '请直接查看 SnowLuma 的 logs/snowluma-*.log。';
@@ -253,12 +265,14 @@ const snowlumaSilentHint = (minutes) => `已连接但 ${minutes} 分钟没有收
  * @param {object} opts
  * @param {number} opts.now 毫秒时间戳（必填）
  * @param {number} [opts.silenceWarnMs] 静默阈值；缺省 10 分钟，最低 60 秒
+ * @param {number} [opts.goodFalseGraceMs] good=false 连续多久才升级为 degraded；缺省 10 分钟，最低 60 秒
  * @returns {{connected: boolean|undefined, accountOnline: boolean|null|undefined, good: boolean|null,
  *   goodSource: string|null, goodError: string|null, lastPacketAgoMs: number|null,
- *   lastPacketKind: string|null, silent: boolean, degraded: boolean, hint: string|null}}
+ *   lastPacketKind: string|null, silent: boolean, suspect: boolean, goodFalseForMs: number,
+ *   goodFalseGraceMs: number, degraded: boolean, hint: string|null}}
  */
 export function snowlumaSnapshot(state = {}, opts = {}) {
-  const { now, silenceWarnMs } = opts ?? {};
+  const { now, silenceWarnMs, goodFalseGraceMs } = opts ?? {};
   if (!Number.isFinite(now)) {
     throw new TypeError('snowlumaSnapshot: now 必须是毫秒时间戳（由调用方注入，本模块不读系统时钟）');
   }
@@ -268,13 +282,21 @@ export function snowlumaSnapshot(state = {}, opts = {}) {
   const rawAgo = lastPacketAt ? now - lastPacketAt : null;
   const agoMs = rawAgo === null ? null : Math.max(0, rawAgo);
   const warnMs = Math.max(MIN_SILENCE_WARN_MS, positive(silenceWarnMs, DEFAULT_SILENCE_WARN_MS));
+  const graceMs = Math.max(MIN_GOOD_FALSE_GRACE_MS, positive(goodFalseGraceMs, DEFAULT_GOOD_FALSE_GRACE_MS));
 
   const silent = lastPacketAt > 0 && agoMs > warnMs;
-  // 只有 SnowLuma **明确自报** good=false 才算「确认坏了」（接收链路）。
+  // 只有 SnowLuma **明确自报** good=false 才进入「疑似接收链路异常」。
   const confirmed = s.good === false;
+  const goodFalseSince = positive(s.goodFalseSince, 0);
+  // 旧快照没有 goodFalseSince 时按「已经持续满 grace」处理，保持老调用方的行为。
+  const goodFalseForMs = confirmed
+    ? (goodFalseSince ? Math.max(0, now - goodFalseSince) : graceMs)
+    : 0;
+  const persistent = confirmed && goodFalseForMs >= graceMs;
 
   let hint = null;
-  if (confirmed) hint = SNOWLUMA_CONFIRMED_HINT;
+  if (persistent) hint = SNOWLUMA_CONFIRMED_HINT;
+  else if (confirmed) hint = snowlumaSuspectHint(Math.round(goodFalseForMs / 1000), Math.round(graceMs / 60000));
   else if (silent) hint = snowlumaSilentHint(Math.round(agoMs / 60000));
 
   return {
@@ -287,7 +309,10 @@ export function snowlumaSnapshot(state = {}, opts = {}) {
     lastPacketAgoMs: agoMs,
     lastPacketKind: s.lastPacketKind || null,
     silent,
-    degraded: confirmed || silent,
+    suspect: confirmed,
+    goodFalseForMs,
+    goodFalseGraceMs: graceMs,
+    degraded: persistent || silent,
     hint
   };
 }

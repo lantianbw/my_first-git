@@ -24,6 +24,8 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const bridge = fs.readFileSync(path.join(ROOT, 'src', 'bridge.js'), 'utf8');
+const healthSrc = fs.readFileSync(path.join(ROOT, 'src', 'observability', 'health.js'), 'utf8');
+const tokenSrc = fs.readFileSync(path.join(ROOT, 'src', 'heal', 'token.js'), 'utf8');
 const consoleHtml = fs.readFileSync(path.join(ROOT, 'public', 'console.html'), 'utf8');
 const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
 const example = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.example.json'), 'utf8'));
@@ -36,6 +38,8 @@ const codeOf = (src) => src
   .split(/\r?\n/).map((l) => l.replace(/\/\/.*$/, '')).join('\n')
   .replace(/\/\*[\s\S]*?\*\//g, '');
 const bridgeCode = codeOf(bridge);
+const healthCode = codeOf(healthSrc);
+const tokenCode = codeOf(tokenSrc);
 
 test('SnowLuma 客户端库不低于 bot_status 出现的版本（1.14.17）', () => {
   // 低于这个版本订阅不到 bot_status：账号掉线/被顶号将没有任何信号。
@@ -137,9 +141,9 @@ test('静默检测不得声称能判断 hook 死活（心跳是本地生成的�
   // 不经过 QQ 事件流水线。所以「没有事件包」只能证明 SnowLuma 进程/WS 卡住了，
   // **不能**证明它的 [Hook] 收不到 QQ 数据 —— 那个只能靠 status.good。
   // 措辞若写成"沉默=hook 死了"，运维会被引到错误的结论上。
-  const silentHint = bridgeCode.slice(
-    bridgeCode.indexOf('else if (silent)'),
-    bridgeCode.indexOf('else if (silent)') + 420,
+  const silentHint = healthCode.slice(
+    healthCode.indexOf('const snowlumaSilentHint'),
+    healthCode.indexOf('const snowlumaSilentHint') + 420,
   );
   assert.ok(silentHint.length > 0, '应能定位静默分支的提示文案');
   assert.ok(
@@ -171,8 +175,8 @@ test('控制台有对应的告警条与卡片', () => {
 
 test('端点自愈可关，且默认保持「跟随」（向后兼容）', () => {
   assert.match(
-    bridgeCode,
-    /cfg\.snowluma\?\.followDiscoveredEndpoint !== false/,
+    tokenCode,
+    /followDiscoveredEndpoint !== false/,
     '必须支持 snowluma.followDiscoveredEndpoint 关闭端点跟随',
   );
   assert.equal(
@@ -181,7 +185,7 @@ test('端点自愈可关，且默认保持「跟随」（向后兼容）', () =>
   );
   // 关掉时不得把发现的端点写回文件
   assert.match(
-    bridgeCode,
+    tokenCode,
     /\.\.\.\(followEndpoint \? \{ wsUrl, httpUrl: r\.baseUrl \} : \{\}\)/,
     '关闭跟随时不得把 wsUrl 写回 config.json（否则"我设了别处"会被持久化抹掉）',
   );

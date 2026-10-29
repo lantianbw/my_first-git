@@ -14,7 +14,7 @@
 | --- | --- |
 | 契约里 30 个"需合并"模块 | 15 个接线并上线、8 个判定不接（其中 4 个文件已删）、7 个未动（安全/提示词相关） |
 | 契约 63 个域模块 | 全部有处置结论，无"待接线"项 |
-| 单测 | 630 条（新式）+ `scripts/test-*.mjs` 老脚本全绿 |
+| 单测 | 632 条（新式）+ `scripts/test-*.mjs` 老脚本全绿 |
 | 桥接体积 | 删掉约 2.3k 行内联实现，`bridge.js` 只剩 IO 与能力注入 |
 
 **落地顺序**：`persist/atomic` + `obs/log`（地基）→ 纯函数批（length / outbound-content / health / tool-log / batch / recheck / migrations / heal-token / segments）→ 调度批（wake / chain）→ 会话批（判定不接）→ `outbound/send`（单行化 + 超长拆分）→ 影子批（`session/router`、`inbound/message`）。
@@ -34,7 +34,8 @@
 - Trae 定时任务（10:30）：解读报告，含 router / inbound-message / triggers 影子分歧
 - `scripts/audit-bridge-harness.mjs`：改为按 `bridge.js` 的 import 语句自动注入沙箱，以后再抽模块不用改脚手架；`NodeApiClient` 桩固定在自动注入之后覆盖，防止测试访问真实 DSH
 - 轮换 idle 闸：用户消息触发的唤醒使用入库前 `lastIncomingAt`，修掉“超龄会话永远无法被用户消息轮换”的时序问题
-- mod 系统 v1：`mods/loader` + `mods/host`，接通 `inbound.observe / outbound.observe / wake.before / tick.daily`；异常隔离、200 字预算、200ms tick 超时，空目录零行为（630 条单测）
+- mod 系统 v1：`mods/loader` + `mods/host`，接通 `inbound.observe / outbound.observe / wake.before / tick.daily`；异常隔离、200 字预算、200ms tick 超时，空目录零行为
+- SnowLuma 健康去抖：`good=false` 连续 10 分钟才升级告警，短抖动只标 `suspect`；不再把 105 秒空闲误报当成入站故障
 
 ---
 
@@ -91,7 +92,7 @@ D.2 里已删文件的 4 个（`session/store`、`session/social-state`、`sessi
 | --- | --- |
 | idle 闸时序 | **已修复**：用户消息触发的唤醒沿链携带入库前 `lastIncomingAt`；主动唤醒仍按当前时间判定 |
 | 两套日志路径 | `/root/dsh-run/bridge.log`（systemd stdout）与 `/opt/qq-bridge/state/bridge.log`（桥自带轮转）。查日志时注意区分 |
-| SnowLuma 抖动 | 约每 10 分钟一次 `good=false`，均自愈；抖动期间入站消息可能丢，属上游 |
+| SnowLuma 自报静默 | Hook 在 105 秒无报文即 `good=false`，多为空闲误报；桥接已改为连续 10 分钟才告警，短抖动只记 `suspect`，不自动重启 |
 | 控制台令牌 | 启动日志显示"未配置，自动生成"；`/api/socialV2/rotation/preview` 401 是进程内 token 与 state 文件不同步 |
 | 归档 `topics` 为空 | 轮换快照里长期话题为 0 条，可能 `activeTopics` 从未写入；影响长期记忆衔接 |
 | OCR「服务忙」 | OneBot 上游返回 code=200，桥已重试 3 次 |

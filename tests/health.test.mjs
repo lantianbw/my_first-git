@@ -277,6 +277,41 @@ test('快照 good=false：优先判「SnowLuma 自报接收链路坏」，与静
   assert.match(s.hint, /不是桥接的问题/);
 });
 
+test('快照 good=false 去抖：未满 grace 只标 suspect，满 grace 才 degraded，恢复后清零', () => {
+  const base = {
+    connected: true,
+    accountOnline: true,
+    good: false,
+    goodSource: 'heartbeat',
+    lastPacketAt: NOW - 1_000
+  };
+  const short = snowlumaSnapshot(
+    { ...base, goodFalseSince: NOW - 5 * MIN },
+    { now: NOW, goodFalseGraceMs: 10 * MIN }
+  );
+  assert.equal(short.suspect, true);
+  assert.equal(short.degraded, false, '105 秒空闲误报不能在 5 分钟时就升级为故障');
+  assert.equal(short.goodFalseForMs, 5 * MIN);
+  assert.equal(short.goodFalseGraceMs, 10 * MIN);
+  assert.match(short.hint, /尚未达到持续 10 分钟阈值/);
+  assert.match(short.hint, /空闲/);
+
+  const atBoundary = snowlumaSnapshot(
+    { ...base, goodFalseSince: NOW - 10 * MIN },
+    { now: NOW, goodFalseGraceMs: 10 * MIN }
+  );
+  assert.equal(atBoundary.degraded, true, '连续满 10 分钟才告警');
+  assert.match(atBoundary.hint, /\[Hook\]/);
+
+  const recovered = snowlumaSnapshot(
+    { ...base, good: true, goodFalseSince: 0 },
+    { now: NOW, goodFalseGraceMs: 10 * MIN }
+  );
+  assert.equal(recovered.suspect, false);
+  assert.equal(recovered.degraded, false);
+  assert.equal(recovered.goodFalseForMs, 0);
+});
+
 test('快照静默：10 分钟阈值边界（含等于不算）、文案带分钟数、阈值下限 60s', () => {
   const silentAt = (ago, silenceWarnMs) => snowlumaSnapshot(
     { good: true, lastPacketAt: NOW - ago },
