@@ -91,6 +91,17 @@ git worktree add ../qq-bridge-m2 -b mod/m2-preset-boundaries
 - 规则：**模块对话只提交到自己分支，不合并、不部署**；完成后报告 commit hash。
 - 发布：主理人按 M1 → M3 → M4 / M2 → M6 的顺序合并到 `main`，在 main worktree 跑全量测试，再走部署锁。
 
+**第 1 批工作区已建好（2026-10-29）：**
+
+| 模块 | 工作区 | 分支 | 状态 |
+| --- | --- | --- | --- |
+| M1 | `E:\DSH\qq-bridge-m1` | `mod/m1-inbound-files` | 待开工 |
+| M2 | `E:\DSH\qq-bridge-m2` | `mod/m2-preset-boundaries` | 待开工 |
+| M5 | `E:\DSH\qq-bridge-m5` | `mod/m5-ops-metrics` | 待开工 |
+
+三个工作区的 `node_modules` 已用目录联接指向主干仓库，可直接跑测试/构建。
+M3 / M4 / M6 等前置模块完成后再建，命令同上。
+
 ### 方案 B（最简，只能串行）：同一个目录，一个一个做
 
 - 一个模块做完、测试全绿、提交、部署、更新交接文档，再开下一个对话。
@@ -108,7 +119,7 @@ git worktree add ../qq-bridge-m2 -b mod/m2-preset-boundaries
 ```
 你是 qq-bridge 的 M1 模块负责人（入站文件安全）。
 先读 E:\DSH\qq-bridge\docs\trap-hardening-handover.md 第 6 节第 2 项，再读 docs/module-ownership.md 的 M1 任务书。
-工作目录：<你的 worktree 路径>（分支 mod/m1-inbound-files）。
+工作目录：E:\DSH\qq-bridge-m1（分支 mod/m1-inbound-files）。
 
 只改这些文件：新建 src/inbound/file-risk.js（纯函数）+ tests/inbound-file-risk.test.mjs，src/bridge.js 只加一处调用。
 不要碰 src/guards/*、preset、src/content/*（那些是别的模块的）。
@@ -130,7 +141,7 @@ git worktree add ../qq-bridge-m2 -b mod/m2-preset-boundaries
 ```
 你是 qq-bridge 的 M2 模块负责人（提示词硬边界）。
 先读 E:\DSH\qq-bridge\docs\chat-trap-review.md §12.5（R2~R5），再读 docs/module-ownership.md 的 M2 任务书。
-工作目录：<你的 worktree 路径>（分支 mod/m2-preset-boundaries）。
+工作目录：E:\DSH\qq-bridge-m2（分支 mod/m2-preset-boundaries）。
 
 只改 preset 源文件 dsh/agent-presets/qq-chat-v2/agent.cordis.yml，然后重新生成 plugins/.../qq-chat-v2.patch.yml。
 不要碰 src/ 下任何文件（那是别的模块的）。
@@ -181,7 +192,7 @@ git worktree add ../qq-bridge-m2 -b mod/m2-preset-boundaries
 ```
 你是 qq-bridge 的 M5 模块负责人（运维与审计）。
 先读 docs/trap-hardening-handover.md 第 5.1、5.4 节，再读 docs/module-ownership.md 的 M5 任务书。
-工作目录：<你的 worktree 路径>（分支 mod/m5-ops-metrics）。
+工作目录：E:\DSH\qq-bridge-m5（分支 mod/m5-ops-metrics）。
 
 只改 scripts/ops-daily-check.sh 和 docs/trap-hardening-handover.md 的观察记录。
 不要碰 src/ 和 preset。
