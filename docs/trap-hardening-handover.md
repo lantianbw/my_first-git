@@ -10,33 +10,72 @@
 ## 0. 启动提示（新对话可直接粘贴）
 
 ```
-读 E:\DSH\qq-bridge\docs\trap-hardening-handover.md，按第 6 节待办继续。
-先用三句话复述：本轮改了什么、线上回滚点在哪、还剩哪几项没做，然后再动手。
+读 E:\DSH\qq-bridge\docs\trap-hardening-handover.md 第 1 节（一页纸结论）与第 6 节（待办），
+再读 E:\DSH\qq-bridge\docs\module-ownership.md 第 0.0 节（主脑职责）与第 7 节（看板）。
+先用三句话复述：现在做到哪、线上回滚点在哪、还剩哪几项没做，然后再动手。
 只加硬约束，不要重写人格风格；不要引入每条消息额外的模型调用。
 ```
 > 多对话并行、一个对话负责一个模块时，先读 `docs/module-ownership.md` 认领模块；不要在未认领的情况下直接改 `src/bridge.js`。
 
 ---
 
-## 1. 一页纸结论
+## 1. 一页纸结论（2026-10-30 01:40 更新）
 
 | 项 | 状态 |
 | --- | --- |
-| E1 复述敏感人物名 | ✅ 出站硬拦，已上线 |
-| E2 亲属称呼施压 | ✅ 出站硬拦 + 记忆边界，已上线 |
-| 假传指令 | ✅ 改为「先要证据」，已上线（15:29 生效） |
-| 不复述 / 情感撤退 / 收尾不补称呼 | ⚠️ 仅提示词，无代码判定 |
-| E3 技术探询统一话术 | ✅ 已上线（17:24，M2 preset） |
-| E7 群内可疑文件 | ✅ 已上线（17:23，M1 入站拦截 `[guard] suspicious-file`） |
-| P2 四项（风险档案 / 点名判断 / 审计指标 / 可疑文件） | 审计指标 ✅（M5）、可疑文件 ✅（M1）；风险档案 / 点名判断 ❌ 未做 |
-| AI 味改造 R1~R5 | R1 ✅（16:42）；R2~R5 ✅（17:24，M2）——都还没被真实流量验证 |
-| 真实命中 | **0 次**（截至 10-29 17:25）——五道防线都未被真实消息触发过 |
+| **M1** 入站可疑文件 | ✅ 已上线（10-29 17:23），`[guard] suspicious-file` |
+| **M2** 提示词硬边界（E3 技术探询 + R2~R5 AI 味） | ✅ 已上线（17:24） |
+| **M3** 记忆风险档案（爱下套 / 不能接的话题 / 已拒称呼） | ✅ 已上线（18:59） |
+| **M4** 点名门（连续 ≥3 次不再强制唤醒） | ✅ 已上线（18:59） |
+| **M5** 运维审计三行指标 | ✅ 脚本已出（24h 观察待补，见 §6） |
+| **M6** preset 契约存量红 | ✅ 修好，契约 7/7 绿 |
+| **M7** 音色换声 | ✅ 已上线（21:53），新音色 `cosyvoice-v3.5-plus-m7-...` |
+| **M8** 好感度 / 关系温度 | ✅ 已上线（21:51），`affection` -100~100 + 标签 |
+| **M9** 思维链防抖（逐条思考再回） | ✅ 已上线（21:51），preset 层 |
+| **M10** QQ 资料管理探测 | ✅ 探针脚本已就绪（结论待跑，见 §6） |
+| **M11** 能力清单 + 告警通道 | ✅ 已上线（01:00），线上实测 `capabilities` 22 项；error 级反馈真发 owner |
+| **M12** 她的自述话术（说人话 + 故障报一次） | ✅ 已上线（01:00） |
+| **M13** 记忆证据引用 + 结尾人格锚 | ✅ 已上线（01:35），原话 evidence + prompt 末尾 70 字人格锚 |
+| 真实命中 | **0 次**（截至 10-30 01:40）——五道防线仍未被真实消息触发过 |
 
-一句话：**最坏的几类事故（敏感人名、被叫爷爷、背台词、可疑文件）都已在发送前/入站侧拦住，但都还没被真实场景验证；剩风险档案、点名判断与 24h 观察。**
+**一句话**：12 个模块全部上线，测试 749 → **771 全绿**。防线齐全但**仍未获真实流量验证**；剩 24h 观察（M5）与资料管理探测结论（M10）两项收尾。
+
+**接手者最容易踩的坑**：别把「0 次命中」当成「问题已解决」——那只是「还没遇到诱因」，见 §7。
 
 ---
 
 ## 2. 变更清单
+
+### 2.1 M1~M13 新增/改动总览（2026-10-29 17:00 ~ 10-30 01:35）
+
+> 详细文件归属见 `docs/module-ownership.md` §1 模块总表；这里只列「接手时必须知道的新增文件与关键行为」。
+
+**新增纯函数模块（都带 `spec` 契约、都 fail-open）**：
+
+| 文件 | 作用 | 模块 |
+| --- | --- | --- |
+| `src/inbound/file-risk.js` | 入站文件名风险判定（`assessFileRisk`），只判文件名不判正文 | M1 |
+| `src/memory/risk-profile.js` | 记忆风险档案（`markKinshipRefusal` / `addNoGoTopic` / `setTrapHappy`）+ **M13 起带 `evidence` 原话** | M3 / M13 |
+| `src/memory/affection-profile.js` | 好感度/关系温度（`adjustAffection` / `setAffection` / `addAffectionTag`，-100~100） | M8 / M13 |
+| `src/tools/capabilities.js` | 人话能力表（22 项）+ 告警文案与冷却（`buildCapabilities` / `renderFeedbackAlert` / `createAlertCooldown`） | M11 |
+
+**新增脚本（不上线，只在本机跑）**：
+
+| 文件 | 作用 | 模块 |
+| --- | --- | --- |
+| `scripts/probe-qq-profile.mjs` | 只读探测 SnowLuma 是否支持改自己 QQ 资料（用非法参数探测动作存在性，绝不真改） | M10 |
+| `scripts/clone-voice.mjs` | 音色复刻（百炼 voice-enrollment → 返回 voice_id） | M7 |
+
+**关键行为变化（接手必须知道）**：
+
+1. **`bridge.js` 记忆段**：`markKinshipRefusalV2` 改为薄门面（判定在纯函数里），拒绝称呼时**连带下调好感度 -10**（`KINSHIP_COOLING_DELTA`）。
+2. **`bridge.js` 唤醒段**：`evaluateWakeTriggerV2` 加「点名门」——同一人连续点名 ≥3 次（期间 AI 未回）时 @/名字不再单独唤醒。
+3. **`bridge.js` 提示词段**：`buildWakePromptV2` 的 `buildWithTail` 在**最后**追加人格锚（70 字上限、计入 budget、可关）。
+4. **`bridge.js` 反馈段**：`qq_report_feedback(level='error')` **真的私聊 owner**（去掉了从未接线的 `notifyOwnerOnError` 判定），带 10 分钟同内容冷却。
+5. **`bridge.js` 提示词返回**：`qq_get_prompt` 新增 `capabilities` 数组（人话能力 + 开关状态 + 原因）。
+6. **`memory-render.js`**：印象行依次渲染「好感度 → 风险边界 → 原话证据」，老数据（无对应字段）照旧渲染。
+
+### 2.2 R1 时代的改动（2026-10-29 16:42，保留备查）
 
 | 文件 | 版本/形态 | 行为变化 |
 | --- | --- | --- |
@@ -69,12 +108,14 @@
 | 21:50–21:51 | 第六次发布：合并 M8 `813f52f` / M9 `7207c00` / M10 `24dfece` → `deploy.ps1`（M8 `bridge.js`+`memory/affection-profile.js`+`content/memory-render.js`）+ scp patch（M9）+ 重启 `dsh-web`（M10 只读脚本无需上线） | 全绿 711；备份 `src.bak-215008`、patch 备份 `qq-chat-v2.patch.yml.bak-2150`；部署锁已释放；`qq-bridge`/`dsh-web` 均 active、NRestarts=0、无错误 |
 | 21:53 | 第七次发布（M7 音色换声上线）：远端 `config.json` 的 `socialV2.voice.tts.voiceId` 从旧音色换成 M7 复刻的新音色 `cosyvoice-v3.5-plus-m7-1d808330...`，重启 `qq-bridge` | 备份 `config.json.bak-2153`；重启后 active、NRestarts=0；远端 `tts-batch` 实测新音色 4 个语气均正常合成（wav 1.8~2.6s） |
 | 01:00 | 第八次发布：合并 M11 `b456283` / M12 `699ef05` → `deploy.ps1`（M11 `bridge.js`+`tools/capabilities.js`）+ scp patch（M12）+ 重启 `dsh-web` | 全绿 749；备份 `src.bak-010024`、patch 备份 `qq-chat-v2.patch.yml.bak-0100`；部署锁已释放；两服务 active、NRestarts=0 |
+| 01:35 | 第九次发布：合并 M13 `9d0a5dc`（含 `623571d`）→ `deploy.ps1`，4 个 src 文件（`bridge.js` / `memory/risk-profile.js` / `memory/affection-profile.js` / `content/memory-render.js`） | 全绿 771；备份 `src.bak-013539`；部署锁已释放；`qq-bridge` active、NRestarts=0；4 文件 md5 本地/远端一致 |
 
 **回滚点（记清楚，别搞错）**
 
 | 目的 | 用什么 | 说明 |
 | --- | --- | --- |
-| 代码整轮回滚（含 M11） | `/opt/qq-bridge/src.bak-010024` | **M11 上线前的完整快照**，当前最新回滚点 |
+| 代码整轮回滚（含 M13） | `/opt/qq-bridge/src.bak-013539` | **M13 上线前的完整快照**，当前最新回滚点 |
+| 代码整轮回滚（含 M11） | `/opt/qq-bridge/src.bak-010024` | M11 上线前的完整快照 |
 | preset 回滚（含 M12） | `.../presets/qq-chat-v2.patch.yml.bak-0100` | M12 上线前的 patch |
 | 代码整轮回滚（含 M8） | `/opt/qq-bridge/src.bak-215008` | M8 上线前的完整快照 |
 | 代码整轮回滚（含 M3+M4） | `/opt/qq-bridge/src.bak-185849` | M3+M4 上线前的完整快照 |
@@ -98,10 +139,10 @@ ssh root@175.178.200.118 "cp -a /opt/qq-bridge/plugins/qq-agent-presets/presets/
 | 文件 | md5 |
 | --- | --- |
 | `src/guards/outbound-content.js` | `d7d2c989e9726bbfb5e22c1f46975c93` |
-| `src/content/memory-render.js` | `7067dd908a2b0fb6a3eebdc0646c9386` |
-| `src/bridge.js` | `1d5dcd8be9c640b654a9d9d4b3a5c03a` |
-| `src/memory/risk-profile.js` | `c52b6d57d69d54a49af28b81f6415bbd` |
-| `src/memory/affection-profile.js` | `ca5f5af4ce39b51fd38a8331d1e15e40` |
+| `src/content/memory-render.js` | `ec3cc92674ecc9b785e4d5bac96882aa` |
+| `src/bridge.js` | `61d747907abd483c08b5c5d0869e7420` |
+| `src/memory/risk-profile.js` | `d987ce9ce11c0cf6303302d85e8899d1` |
+| `src/memory/affection-profile.js` | `d78089447eddef2104dc70e52dc4e3dd` |
 | `src/tools/capabilities.js` | `c827dc4c17c2e3fba6c30146b8f8417d` |
 | `plugins/.../qq-chat-v2.patch.yml` | `974de7636e111c6ccdea8749e08f3848` |
 
@@ -111,7 +152,7 @@ ssh root@175.178.200.118 "cp -a /opt/qq-bridge/plugins/qq-agent-presets/presets/
 
 | 项 | 证据 |
 | --- | --- |
-| 单测 | `node --test tests/*.test.mjs` → **749 通过 / 0 失败**（711 + M11 的 25 + M12 的 13） |
+| 单测 | `node --test tests/*.test.mjs` → **771 通过 / 0 失败**（749 + M13 的 22：evidence 12 + 人格锚 10） |
 | preset 契约 | `node scripts/test-agent-preset-patches.mjs` → 通过 |
 | 线上模块 | 在服务器跑 `evaluateContent`：实体命中→拦、称呼命中→拦、owner 私聊→放行（`entity false entity / kinship false kinship / owner true`） |
 | R1 线上判定 | `床以外都是远方`→`presetEcho` 拦；`行吧，床以外都是远方，睡`→拦；`今天的运动量还行`→放行 |
@@ -123,6 +164,7 @@ ssh root@175.178.200.118 "cp -a /opt/qq-bridge/plugins/qq-agent-presets/presets/
 | M10 线上判定 | 新增只读探针 `scripts/probe-qq-profile.mjs`（用「非法类型参数」探测改资料动作是否存在，1400=支持/1404=不支持，绝不真改）；**结论待 SnowLuma 在线时在远端跑一次** |
 | M11 线上判定 | 远端实测 `GET /api/socialV2/prompt` 返回 **`capabilities` 22 项**（人话，如「发语音」「发表情包」「汇报故障」），字段 `{name,desc,enabled,why?}` 合规；`enabledTools` 仍 52 项并存。`qq_report_feedback(level='error')` 已改为真发私聊 owner（去掉了从未接线的 `notifyOwnerOnError` 开关判定），带 10 分钟同内容冷却 |
 | M12 线上判定 | 远端 patch 含【被问「你会什么」：说人话】与【坏了怎么办：报一次，别念报错】两段；契约 7/7 绿 |
+| M13 线上判定 | 远端 4 文件 md5 与本地一致；`evidence: {quote,at,key,kind}` 随 `markKinshipRefusal` 落盘（quote 40 字、最多 3 条、同句去重），渲染只出最近 1 条；人格锚在 `buildWithTail` 的 tailTotal **之后**追加（70 字硬上限、角色名截 16 字、计入 budget、`socialV2.prompt.personaAnchor === false` 可关）。**人格锚的实际抗漂移效果需线上观察，未验证** |
 | 文件一致 | src + patch 的 md5 本地/远端完全一致 |
 | 服务 | `qq-bridge` / `dsh-web` 均 `active` |
 | 真实拦截 | **0 次**（`entity-blocked` 0、`kinship-blocked` 0、`preset-echo` 0、`suspicious-file` 0）——见第 7 节 |
@@ -206,33 +248,48 @@ tail -20 /opt/qq-bridge/state/qq-activity.log
 
 ---
 
-## 6. 待办（按优先级）
+## 6. 待办（2026-10-30 01:40 重写：原 10 项已全部完成）
 
-| # | 任务 | 落点 | 验收 |
+### 已完成对照（原表 10 项 → 落到哪个模块）
+
+| 原待办 | 落到 | commit |
+| --- | --- | --- |
+| 1 R1 preset 例句黑名单 | 本轮前已做 | `a07c711` |
+| 2 P2-4 可疑文件 | **M1** `ab6542a` | 已上线 |
+| 3 E3 技术探询话术 | **M2** `a2573b3` | 已上线 |
+| 4 T7 24h 观察 | **M5** `841b51c`（脚本）→ 观察本身仍待做，见下 | — |
+| 5 P2-1 风险档案 | **M3** `635154b`（+ M8 好感度 `813f52f`） | 已上线 |
+| 6 P2-2 点名判断 | **M4** `e148c5d` | 已上线 |
+| 7 P2-3 审计指标 | **M5** `841b51c` | 已上线 |
+| 8 R2~R5 AI 味 | **M2** `a2573b3`（+ M9 思维链防抖 `7207c00`） | 已上线 |
+| 9 `markKinshipRefusalV2` 单测 | **M3** `635154b`（已抽纯函数） | 已上线 |
+| 10 preset 契约存量红 | **M6** `b0b1b76` | 契约 7/7 绿 |
+
+### 还没做的（只剩 3 项）
+
+| # | 任务 | 怎么做 | 验收 |
 | --- | --- | --- | --- |
-| 1 | ~~**R1 preset 例句黑名单**~~ ✅ **已完成（16:42，commit a07c711）**：8 句原句 + 标点/拆行/嵌长句变体全部出站拦截；线上实测命中 `presetEcho` | `src/guards/outbound-content.js` | 单测 7 条；线上判定已验；真实流量待命中 |
-| 2 | **P2-4 可疑文件**：命中「资源合集/下载/解压密码/打开即可」类文件名 → 不接话、记一条 activity | `bridge.js` 群消息分支 | 10-29 15:22 那条「这文件名比内容还长」作为回归样本：改为不回复 + `[guard] suspicious-file` |
-| 3 | **E3 技术探询话术**：统一一句「这些我不聊，换个话题」，被追问不解释 | preset | 提示词含该句；模拟「你用啥链接的 QQ」只回这一句 |
-| 4 | **T7 24h 观察** | 运维 | 见 5.4 |
-| 5 | **P2-1 风险档案**：把「爱下套的人 / 不能接的话题」写进 `memberImpressions`（`noKinshipTitle` 是它的雏形） | `bridge.js` + `memory-render` | 唤醒提示里能看到 |
-| 6 | **P2-2 点名判断**：@ 只保证「会看」，同一人连续点名 3 次可只回一句或不回 | `scheduler/triggers` 或 preset | 连续点名场景不再 100% 入场 |
-| 7 | **P2-3 审计指标**：每日巡检加「实体拦截数 / 称呼复发数 / 群发言占比」 | `scripts/ops-daily-check.sh` | 报告里出现三行 |
-| 8 | **R2~R5 AI 味**：数字/时间降级、金句连发 shadow、三连问限制、借嘴软约束 | preset + anti-ai | 见 `chat-trap-review.md` §12.5 |
-| 9 | 补 `markKinshipRefusalV2` 单测 | `tests/`（需先把它抽成纯函数） | 覆盖：私聊记、群聊不记、重复不叠加 |
-| 10 | 修 `scripts/test-qq-preset-contract.mjs` 的存量红：`missing rule: qq_memory_clear` | preset 或测试 | 该脚本转绿（注意：这是历史遗留，改之前先确认是否真要把 `qq_memory_clear` 写进人格） |
+| 1 | **M5 的 24h 观察记录**（窗口到 **10-30 14:55** 满） | 跑 `bash scripts/ops-daily-check.sh`，把「entity/kinship/preset-echo/suspicious-file 拦截数、称呼复发、群发言占比」写进本文 §5.4 | 报告里出现三行指标；**若真实命中仍 0，只写「无诱因」，不许写「已解决」** |
+| 2 | **M10 资料管理探测结论** | SnowLuma 在线时在远端跑 `node scripts/probe-qq-profile.mjs`（本地 3000 端口没起也能跑，会提示先启动） | 输出「支持哪些字段 / 不支持则有无替代路径」；支持才考虑立项做真·资料管理 |
+| 3 | **M13 人格锚效果观察**（低优先） | 观察几天：会话变长后是否还会「人格漂移」；对比关闭 `socialV2.prompt.personaAnchor` 前后的表现 | 若无明显收益，可关掉省 token |
+
+> **`docs/feature-wishlist.md` 里的功能**（QQ 空间、虚拟人生、万能解析器、表情包小偷等）**均未立项**，是候选池，不是待办。
 
 ---
 
 ## 7. 已知局限与风险（接手前必须知道）
 
-1. **0 次真实命中 = 未证明。** 两道防线只在单测和「直接调模块」里验证过。真实 QQ 流量里一次都没触发——可能是没再犯，也可能是还没遇到诱因。别在没看到命中前宣布「问题解决」。
+1. **0 次真实命中 = 未证明。** 五道防线（entity / kinship / presetEcho / suspicious-file / mention-gate）只在单测和「直接调模块」里验证过。真实 QQ 流量里一次都没触发——可能是没再犯，也可能是还没遇到诱因。**别在没看到命中前宣布「问题解决」。**
 2. **词表覆盖有限。** 13 条只覆盖本次事故词及其常见变体；谐音（旺京卫）、日文名、其它敏感人物一律漏。`sensitiveEntities` 是「至少挡住已知的最坏情况」，不是「敏感人物过滤器」。
 3. **拦截 = 让模型重写，不是静默丢弃。** 模型若坚持，会连续被拒、这轮可能不说话。观察时要同时看「拦截数」和「该说话却没说的次数」。
 4. **亲属称呼会误伤正常叙事。** 群聊里讲「我爷爷那辈」也会被拦（然后被要求重写）。这是有意的取舍：宁可让它换句话，也不让它练成「爷爷」的条件反射。
 5. **群聊不记 `noKinshipTitle`。** 群里分不清是谁在要称呼，宁可不记；所以群里的称呼施压只能靠当轮拦截。
-6. **边界标记不衰减。** 一旦写进档案就一直在，直到手工清。若对方后来关系缓和、或本来就是玩笑，需要人工清（见 5.3）。
+6. **边界标记与好感度都不衰减。** 一旦写进档案就一直在，直到手工清。**M13 的 `evidence` 可以用来判断「当初到底是不是玩笑」**（看原话），但清除仍需人工（见 5.3）。
 7. **记忆块只渲染最后 10 个印象**（`renderMemory` 的 `impressionLimit`）。被标记的人如果不在最近 10 个里，唤醒提示里看不到这条边界——人数多的群要注意。
-8. **AI 味只治了「背台词」这一种。** R1 已拦掉 preset 8 句原句；「复述+升华」「报精确账」「金句连发」「三连问」仍在（R2~R5 未做）。
+8. **`evidence` 只存最近 3 条、只渲染 1 条。** 这是提示词预算的取舍，不是「完整证据链」。要查历史原话得翻 `state/` 落盘。
+9. **人格锚的抗漂移效果未验证。** lost-in-the-middle 是有依据的现象，但 qq-bridge 场景下能改善多少**没有实测数据**。若观察不到收益，把 `socialV2.prompt.personaAnchor` 设为 `false` 关掉省 token。
+10. **AI 味只治了一部分。** R1 拦 preset 8 句原句；R2~R5（数字/时间降级、金句连发、三连问、借嘴）已在 M2 写进 preset，但**这是提示词约束，不是代码判定**——模型可能不遵守。
+11. **能力清单是「声明」不是「探活」。** `capabilities` 按配置开关算 enabled，不代表那个功能此刻真的能用（比如 TTS 配额用完、SnowLuma 断了）。真故障要靠 M11/M12 的 `qq_report_feedback` 上报。
 
 ---
 
@@ -243,3 +300,8 @@ tail -20 /opt/qq-bridge/state/qq-activity.log
 3. **不要手工改 `plugins/.../qq-chat-v2.patch.yml`**——它是生成物，下次 build 会被覆盖；改源再 build。
 4. **不要在群里解释这两道守卫**（提「提示词/权限/设定」会触发 meta 拦截，也给对方新抓手）。
 5. **不要引入「每条消息多一次模型调用」的方案**——成本按缓存命中率敏感，日均 200~600 次调用。
+6. **不要让模块对话直接部署、直接合并、直接 push**——模块只 commit 到自己分支；合并/部署只由主脑做（见 `module-ownership.md` §0.0）。
+7. **不要在主脑对话里派子代理替模块开工**——每个模块必须有独立对话归属（2026-10-29 踩过）。
+8. **不要在 `risk-profile.js` / `affection-profile.js` 里读 state / 时钟 / 写文件**——它们是纯函数模块，副作用必须留在 `bridge.js`。M13 的 `now` 也是注入的。
+9. **不要把人格细节抄进 `bridge.js`**——人格在 preset / 角色卡，bridge 只放元指令（M13 人格锚就是按这条做的）。抄了会变成「假权威」，改 preset 时不跟着变。
+10. **不要给 `capabilities` 硬编码「可用」**——它必须按配置开关实时算，否则关掉的功能还会被说成「我会」。

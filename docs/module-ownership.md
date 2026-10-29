@@ -553,7 +553,7 @@ const full = `${segments.map((s) => s.text).join('')}${tailTotal}${anchorLine}`;
 | M10 | 已完成 | mod/m10-profile-probe | 24dfece | 脚本就绪、已合并 | 21:47 合并 main |
 | M11 | 已完成 | mod/m11-capabilities | b456283 | 749 全绿、已上线 | 01:00 部署，线上验证 22 项能力 |
 | M12 | 已完成 | mod/m12-self-report | 699ef05 | 749 全绿、已上线 | 01:00 随 M11 上线 |
-| M13 | 待开工 | mod/m13-evidence | — | — | 记忆证据引用，bridge 泳道 |
+| M13 | 已完成 | mod/m13-evidence | 9d0a5dc | 771 全绿、已上线 | 01:35 部署，evidence+人格锚 |
 
 状态只允许四种：`待开工` / `进行中` / `待合并` / `已完成`。改状态时顺手写时间。
 
