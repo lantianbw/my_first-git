@@ -112,6 +112,7 @@ import { createModHost } from './mods/host.js';
 import { createRelationStore } from './content/relation-store.js';
 import { renderMemory as renderMemoryV2 } from './content/memory-render.js';
 import { renderMemoryMarkdown } from './content/memory-export.js';
+import { markKinshipRefusal } from './memory/risk-profile.js';
 import { nextInterval } from './scheduler/interval.js';
 import { matchTriggers } from './scheduler/triggers.js';
 import { shouldRotate } from './session/expiry.js';
@@ -10675,23 +10676,19 @@ async function main() {
   // 亲属称呼被拦一次，就在对方档案上记一笔边界：下次唤醒时记忆块会写「已拒绝亲属称呼」，
   // 让模型不用重新谈判（只记 1:1 私聊——群里分不清是谁在要称呼，宁可不记）。
   // 记不上不影响发送：这里任何异常都只是少一条提示。
+  // 判定与档案结构都在 src/memory/risk-profile.js（纯函数，单测覆盖 tests/memory-boundary.test.mjs），
+  // 这里只负责取状态、把返回值写回、落盘；群聊在取状态前就短路，避免为群会话新建/写入状态。
   function markKinshipRefusalV2(key) {
     try {
       if (!String(key).startsWith('private:')) return;
       const st = getSocialV2State(key);
-      const msgs = Array.isArray(st.recentMessages) ? st.recentMessages : [];
-      let name = '';
-      for (let i = msgs.length - 1; i >= 0; i -= 1) {
-        const m = msgs[i];
-        if (m && !m.isSelf && (m.sender || m.userId)) { name = String(m.sender || m.userId); break; }
-      }
-      if (!name || ['__proto__', 'constructor', 'prototype'].includes(name)) return;
-      if (!st.memberImpressions || typeof st.memberImpressions !== 'object') st.memberImpressions = {};
-      const old = st.memberImpressions[name] || {};
-      const traits = Array.isArray(old.traits) ? old.traits.slice(0, 10) : [];
-      const trait = '要过亲属称呼，已拒绝';
-      if (!traits.includes(trait)) traits.push(trait);
-      st.memberImpressions[name] = { ...old, traits, noKinshipTitle: true };
+      const result = markKinshipRefusal({
+        key,
+        recentMessages: st.recentMessages,
+        memberImpressions: st.memberImpressions
+      });
+      if (!result) return;
+      st.memberImpressions = result.memberImpressions;
       saveSocialV2State();
     } catch (error) {
       log(`⚠️ [guard] 记录称呼边界失败：${error?.message ?? error}`);
