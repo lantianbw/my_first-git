@@ -74,6 +74,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\deploy.ps1
 
 - `-DryRun` 只对账不上传不重启；`-SkipTests` 跳过单测（紧急用）
 - **历史事故**：2026-10-29 只传"改过的文件"，漏了 `bridge.js` 新 import 的 `outbound/send.js`，线上 `ERR_MODULE_NOT_FOUND` 重启循环约 2 分钟。对账就是为此加的。
+- **deploy.ps1 只覆盖 `src/`**：改 `dsh/agent-presets/<preset>/agent.cordis.yml` 后必须
+  ① `node scripts/build-agent-preset-patches.mjs` 重新生成 `plugins/qq-agent-presets/presets/<preset>.patch.yml`，
+  ② scp 该 patch 到 `/opt/qq-bridge/plugins/qq-agent-presets/presets/`，
+  ③ `systemctl restart dsh-web`。已有会话的系统提示不重建，**新会话/下次轮换**才用新规则。
 
 ### 3.2 回滚
 
@@ -154,7 +158,7 @@ docs/                  # 本文件 + 四份设计/目录文档
 | --- | --- | --- |
 | 轮换的 idle 闸时序 | **已修复**：用户消息触发的唤醒沿链使用入库前 `lastIncomingAt` | 由 `tests/bridge-rotation-idle.test.mjs` 锁定；主动唤醒仍读当前值 |
 | SnowLuma 自报静默 | 其 Hook 在 105 秒无 QQ 报文时即报 `good=false`；桥接已去抖：连续 **10 分钟**才告警，短抖动仅记 `suspect` | 不要自动重启：绝大多数是空闲误报，下一报文到达即恢复；真故障看持续 >10 分钟 |
-| 归档 `topics` 为空 | 轮换快照里长期话题 0 条 | **已核查**：主人会话近 2 天 `qq_memory_append` 调用 0 次，属模型没写，不是轮换丢数据；`activeTopics` 本身跨轮换保留，回注也仍带最近 6 条发言。顺带修掉回注重复注入关系线/记忆块的问题 |
+| 归档 `topics` 为空 | 轮换快照里长期话题 0 条 | **已核查**：主人会话近 2 天 `qq_memory_append` 调用 0 次，属模型没写，不是轮换丢数据；`activeTopics` 本身跨轮换保留，回注也仍带最近 6 条发言。顺带修掉回注重复注入关系线/记忆块；并已收紧 `qq-chat-v2` 第 8 条与【记忆卫生】：私聊出现约定/计划/他在做的事必须记一条 activeTopic（≤30 字），收尾自检一次 |
 | 控制台令牌 | 启动日志"未配置，自动生成"；`/api/socialV2/rotation/preview` 401 | 进程内 token 与 `state/console-token` 不同步 |
 | OCR 服务忙 | OneBot 返回 `code=200 msg=服务忙` | 桥已重试 3 次 |
 | 双日志路径 | 见 2.3 | 排查时容易看错文件 |

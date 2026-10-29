@@ -94,7 +94,7 @@ D.2 里已删文件的 4 个（`session/store`、`session/social-state`、`sessi
 | 两套日志路径 | `/root/dsh-run/bridge.log`（systemd stdout）与 `/opt/qq-bridge/state/bridge.log`（桥自带轮转）。查日志时注意区分 |
 | SnowLuma 自报静默 | Hook 在 105 秒无报文即 `good=false`，多为空闲误报；桥接已改为连续 10 分钟才告警，短抖动只记 `suspect`，不自动重启 |
 | 控制台令牌 | 启动日志显示"未配置，自动生成"；`/api/socialV2/rotation/preview` 401 是进程内 token 与 state 文件不同步 |
-| 归档 `topics` 为空 | **已核查**：主人会话近 2 天 `qq_memory_append` 为 0 次，属模型行为（近期多为闲聊，没有可记的进行中话题），不是轮换丢数据；`activeTopics` 跨轮换保留，回注仍有最近 6 条发言兜底。已修掉回注重复注入关系线/记忆块 |
+| 归档 `topics` 为空 | **已核查**：主人会话近 2 天 `qq_memory_append` 为 0 次，属模型行为（近期多为闲聊，没有可记的进行中话题），不是轮换丢数据；`activeTopics` 跨轮换保留，回注仍有最近 6 条发言兜底。已修掉回注重复注入关系线/记忆块；并收紧 `qq-chat-v2` 提示词：私聊出现约定/计划/他在做的事必须记 activeTopic，收尾自检 |
 | OCR「服务忙」 | OneBot 上游返回 code=200，桥已重试 3 次 |
 | `slang` session not-found | 曾出现一次，需确认是否 DSH 重启导致 `slang-session.json` 失效 |
 
