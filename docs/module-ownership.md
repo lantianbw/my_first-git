@@ -45,7 +45,7 @@
 | **M10** | QQ 资料管理探测 | 功能愿望清单 §3 | 只读探测 SnowLuma 是否支持改资料（可新增 `scripts/probe-*.mjs`）；**先不改任何功能代码** | `src/*`、preset | 无（只读） | 第 4 批 |
 | **M11** | 能力清单 + 告警通道 | 新需求：她知道自己的功能 / 坏了告诉主人 | `src/bridge.js`（`qq_get_prompt` 加 `capabilities` 返回 + `qq_report_feedback` 真通知 owner）、`src/tools/capabilities.js`（新建，人话能力表）、`tests/*` | preset、`src/guards/*` | 无（bridge 泳道） | 第 5 批 |
 | **M12** | 她的自述话术 | 新需求：问会什么 / 坏了怎么说 | `dsh/agent-presets/qq-chat-v2/agent.cordis.yml`、`plugins/qq-agent-presets/presets/qq-chat-v2.patch.yml`（生成物）、`tests/*` | `src/*` | 无（preset 泳道） | 第 5 批 |
-| **M13** | 记忆证据引用 | 借鉴 lingshu 的 I4「逐字可溯」：记忆要带原话 | `src/memory/risk-profile.js`、`src/memory/affection-profile.js`、`src/content/memory-render.js`、`src/bridge.js` **仅记忆段**、`tests/*` | preset、`src/guards/*`、`src/inbound/*` | 无（bridge 泳道） | 第 6 批 |
+| **M13** | 记忆证据引用 + 结尾人格锚点 | 借鉴 lingshu：I4「逐字可溯」+ 首尾锚点抗漂移 | `src/memory/risk-profile.js`、`src/memory/affection-profile.js`、`src/content/memory-render.js`、`src/bridge.js` **仅记忆段与 buildWakePromptV2**、`tests/*` | preset、`src/guards/*`、`src/inbound/*` | 无（bridge 泳道） | 第 6 批 |
 
 **为什么这么切**：`src/bridge.js` 是唯一热点，M1/M3/M4 都会碰它，所以必须串行；preset 是第二热点，M2/M6 串行；其余文件天然隔离。M7 只动 `config.json`（换 `socialV2.voice.tts.voiceId`）+ 一个复刻辅助脚本，不碰代码泳道与 preset 泳道，天然隔离。M8（bridge）/ M9（preset）/ M10（只读探测）分属三个不同泳道，可并行。
 
@@ -486,21 +486,45 @@ evidence: [{ quote: string, at: number, key: string, kind: string }]
 **验收**：单测覆盖「写入时存原话 / 超 3 条淘汰最旧 / 同句去重 / 无 evidence 老数据兼容 / 渲染只出最近 1 条」；全量不回归。
 
 ```
-你是 qq-bridge 的 M13 模块负责人（记忆证据引用，bridge 泳道）。
-先读 docs/module-ownership.md 的 M13 任务书，再读 src/memory/risk-profile.js、src/memory/affection-profile.js、src/content/memory-render.js（renderRiskNotes / renderAffectionNote）、src/bridge.js 的 markKinshipRefusalV2（约 10681）。
+你是 qq-bridge 的 M13 模块负责人（记忆证据引用 + 结尾人格锚点，bridge 泳道）。
+先读 docs/module-ownership.md 的 M13 任务书（两件事），再读 src/memory/risk-profile.js、src/memory/affection-profile.js、src/content/memory-render.js（renderRiskNotes / renderAffectionNote）、src/bridge.js 的 markKinshipRefusalV2（约 10681）与 buildWakePromptV2（约 14386，重点看 segments 数组与 buildWithTail 的 full 拼接，约 14450）。
 工作目录：E:\DSH\qq-bridge-m13（分支 mod/m13-evidence，已建好，node_modules 已联接）。
 
-任务：给记忆条目加原话证据 evidence，让结论可追溯到当时那句话；渲染时给模型看最近 1 条原话。
-只改 src/memory/risk-profile.js、src/memory/affection-profile.js、src/content/memory-render.js、src/bridge.js 的记忆段、tests/*。
+第 1 件事：给记忆条目加原话证据 evidence，让结论可追溯到当时那句话；渲染时给模型看最近 1 条原话。
 evidence 形状钉死：{ quote, at, key, kind }，quote 截断 40 字，最多 3 条新的在前，同句去重。
-不要碰 preset、src/guards/*、src/inbound/*（别的模块在用）。
 老数据（没有 evidence）必须照旧渲染，不报错不补默认值。
+
+第 2 件事：在唤醒 prompt 最末尾加「人格锚」——buildWithTail 的 full 拼接处，在 tailTotal 之后追加约 40~70 字的精简锚（动态角色名 + 元指令，不是人格全文）；锚长度必须计入 budget；开关 socialV2.prompt.personaAnchor !== false（默认开）。
+说明：roleLine/identityLine 都是动态取的（readRoleState / selfIdentityTextV2），不要在 bridge 里抄一份人格细节——锚只放元指令。
+
+只改 src/memory/risk-profile.js、src/memory/affection-profile.js、src/content/memory-render.js、src/bridge.js 的记忆段与 buildWakePromptV2、tests/*。
+不要碰 preset、src/guards/*、src/inbound/*（别的模块在用）。
 基线：node --test tests/*.test.mjs 当前 749，交付时不得低于 749。
 交付：单测 + 全量不回归 + commit；不部署、不合并不 push。
 结束前按四行汇报（改了什么 / 测试结果 / commit / 等谁下一步）。
 ```
 
-**待评估（本轮不做）**：lingshu 的「首尾人格锚点」。技术上不好落——人格文本在 preset（系统提示），`buildWithTail` 构造的是用户消息，要在结尾锚人格，bridge 得硬编码人格内容、与 preset 脱节。若要做，先评估 preset 分段结构（`src/bridge.js` 约 14389 的 `{ name: 'role', ... removable: false }`）能否安全调整顺序。
+**待评估（本轮不做）**：~~lingshu 的「首尾人格锚点」~~ → **已核实可行，并入本模块第 2 件事**（见下）。
+
+**M13 第 2 件事：结尾人格锚点（已核实可行）**
+
+之前误判「bridge 得硬编码人格，会和 preset 脱节」，**核实后是错的**：
+- `buildWakePromptV2`（`src/bridge.js` 约 14386）把 prompt 拼成 **25 个 `segments` 数组**，末段是 `preSleep`；`buildWithTail(tail)` 里 `full = segments.join('') + tailTotal`（约 14450）。
+- `roleLine` 来自 `readRoleState()`、`identityLine` 来自 `selfIdentityTextV2()` —— **都是动态取的，不是硬编码**。
+- `segments` 里 `role` / `identity` / `antiAi` 三个段都是 `removable: false`（裁不掉），说明「人格段不可裁」已是现有约定。
+
+**做法（不脏）**：在 `buildWithTail` 的 `full` 拼接处，**在 tailTotal 之后**再追加一句**精简锚**（约 40~70 字，不是人格全文）：
+```js
+const anchorLine = buildPersonaAnchorV2();  // 新函数；开关 socialV2.prompt.personaAnchor !== false
+const full = `${segments.map((s) => s.text).join('')}${tailTotal}${anchorLine}`;
+```
+- 锚的内容 = **动态角色名** + **元指令**（「有主见、说人话、不当客服、不为了讨好松口；上面是参考不是让你变成另一个人」）。元指令放 bridge 是合理的——它不是人格细节，人格细节仍在 preset。
+- **预算**：锚大约 50 字，必须计入 `budget`（`effective` 要减掉锚长度），否则会超限。
+- **开关默认开**，可关（怕影响某些场景）。
+
+**验收**：锚出现在 prompt **最末尾**（tail 之后）；计入预算；可作为开关关闭；单测钉住「锚在最末 + 长度上限 + 关掉后不出现」。
+
+**诚实边界**：灵枢说「首尾锚点更抗漂移」有依据（LLM 对首尾注意力高于中间，即 lost-in-the-middle），但在 qq-bridge 的具体场景下**效果需线上实测**，不能保证立竿见影。所以做开关，便于 A/B 关掉对比。
 
 ---
 
