@@ -30,6 +30,9 @@ OUT="$OUT_DIR/daily-check-$(date +%Y%m%d).log"
   echo "-- slang --"
   grep -i 'slang' "$LOG" | tail -3
 
+  echo "-- shadows --"
+  grep -E 'inbound/message|\[router\]|\[triggers\]|影子不一致' "$LOG" | tail -6
+
   echo "-- owner-last-turn --"
   grep 'private:1843979560' "$STATE/token-usage.jsonl" | tail -1
 
