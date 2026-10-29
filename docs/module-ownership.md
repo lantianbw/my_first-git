@@ -95,12 +95,19 @@ git worktree add ../qq-bridge-m2 -b mod/m2-preset-boundaries
 
 | 模块 | 工作区 | 分支 | 状态 |
 | --- | --- | --- | --- |
-| M1 | `E:\DSH\qq-bridge-m1` | `mod/m1-inbound-files` | 待开工 |
-| M2 | `E:\DSH\qq-bridge-m2` | `mod/m2-preset-boundaries` | 待开工 |
-| M5 | `E:\DSH\qq-bridge-m5` | `mod/m5-ops-metrics` | 待开工 |
+| M1 | `E:\DSH\qq-bridge-m1` | `mod/m1-inbound-files` | 已完成（ab6542a） |
+| M2 | `E:\DSH\qq-bridge-m2` | `mod/m2-preset-boundaries` | 已完成（a2573b3） |
+| M5 | `E:\DSH\qq-bridge-m5` | `mod/m5-ops-metrics` | 已完成（841b51c） |
+| M6 | `E:\DSH\qq-bridge-m6` | `mod/m6-preset-contract` | 已完成（b0b1b76） |
 
-三个工作区的 `node_modules` 已用目录联接指向主干仓库，可直接跑测试/构建。
-M3 / M4 / M6 等前置模块完成后再建，命令同上。
+**第 2 批工作区已建好：**
+
+| 模块 | 工作区 | 分支 | 状态 |
+| --- | --- | --- | --- |
+| M3 | `E:\DSH\qq-bridge-m3` | `mod/m3-memory-risk` | 待开工 |
+| M4 | `E:\DSH\qq-bridge-m4` | `mod/m4-mention-gate` | 阻塞（等 M3） |
+
+所有工作区的 `node_modules` 已用目录联接指向主干仓库，可直接跑测试/构建。
 
 ### 方案 B（最简，只能串行）：同一个目录，一个一个做
 
@@ -158,7 +165,7 @@ M3 / M4 / M6 等前置模块完成后再建，命令同上。
 ```
 你是 qq-bridge 的 M3 模块负责人（记忆与边界档案）。
 先读 docs/trap-hardening-handover.md 第 6 节第 5、9 项，再读 docs/module-ownership.md 的 M3 任务书。
-工作目录：<你的 worktree 路径>（分支 mod/m3-memory-risk）。
+工作目录：E:\DSH\qq-bridge-m3（分支 mod/m3-memory-risk）。
 
 只改 src/memory/*（新建纯函数）、src/content/memory-render.js、src/bridge.js 的记忆段。
 不要碰 src/guards/*、preset（别的模块在用）。
@@ -175,7 +182,7 @@ M3 / M4 / M6 等前置模块完成后再建，命令同上。
 ```
 你是 qq-bridge 的 M4 模块负责人（点名与调度）。
 先读 docs/module-ownership.md 的 M4 任务书；前置 M2/M3 必须已完成（看 §7 状态表）。
-工作目录：<你的 worktree 路径>（分支 mod/m4-mention-gate）。
+工作目录：E:\DSH\qq-bridge-m4（分支 mod/m4-mention-gate）。
 
 只改 src/bridge.js 的 evaluateWakeTriggerV2 一带 + tests；如需话术才动 preset。
 不要碰出站守卫、记忆段。
@@ -209,7 +216,7 @@ M3 / M4 / M6 等前置模块完成后再建，命令同上。
 ```
 你是 qq-bridge 的 M6 模块负责人（存量清理）。
 先读 docs/module-ownership.md 的 M6 任务书；确认 M2 已完成（preset 锁）。
-工作目录：<你的 worktree 路径>（分支 mod/m6-preset-contract）。
+工作目录：E:\DSH\qq-bridge-m6（分支 mod/m6-preset-contract）。
 
 只改 scripts/test-qq-preset-contract.mjs；若必须改 preset，先停下来说明理由，等主理人确认。
 交付：脚本转绿 + commit；不部署。
@@ -234,7 +241,7 @@ M3 / M4 / M6 等前置模块完成后再建，命令同上。
 | M1 | 已完成 | mod/m1-inbound-files | ab6542a | 线上判定已验 | 17:23 上线 |
 | M2 | 已完成 | mod/m2-preset-boundaries | a2573b3 | patch --check 过 | 17:24 上线 |
 | M3 | 待开工 | mod/m3-memory-risk | — | — | 已解阻（M1 已合并） |
-| M4 | 阻塞（等 M3） | — | — | — | M2 已完成 |
+| M4 | 阻塞（等 M3） | mod/m4-mention-gate | — | — | M2 已完成 |
 | M5 | 已完成 | mod/m5-ops-metrics | 841b51c | 三行指标已出 | 24h 观察待补 |
 | M6 | 已完成 | mod/m6-preset-contract | b0b1b76 | 契约 7/7 转绿 | 已合并 main，无需部署 |
 
@@ -262,3 +269,4 @@ commit：
 3. **不要顺手改别人模块的文件**（哪怕只是格式化）。
 4. **不要在 M2/M6 里动 `src/`，也不要在 M1/M3/M4 里动 preset**。
 5. **不要手改 `plugins/.../qq-chat-v2.patch.yml`**（生成物，改源再 build）。
+6. **不要在主理人对话里派子代理替模块开工**：每个模块必须由独立对话负责；子代理没有对话归属，还会绕过 bridge/preset 两把锁（2026-10-29 已踩过一次，M6 保留成果、M3 回退重来）。
