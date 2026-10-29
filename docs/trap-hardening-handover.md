@@ -65,12 +65,14 @@
 | 15:29 | 第二次 patch（假传指令改版）+ 重启 `dsh-web` | 15:29:16 起生效 |
 | 16:42 | `deploy.ps1` 第三次：R1 例句拦截（`bridge.js` + `guards/outbound-content.js`） | 2/2 文件上传，`active`；备份 `src.bak-164220` |
 | 17:22–17:24 | 第四次发布：合并 M1 `ab6542a` / M2 `a2573b3` / M5 `841b51c` → `deploy.ps1`（M1 src）+ scp patch（M2）+ 重启 `dsh-web`（M5 纯脚本无需上线） | 全绿 672；备份 `src.bak-172224`、patch 备份 `qq-chat-v2.patch.yml.bak-1723`；部署锁 `.deploy-lock` 已释放 |
+| 18:58–18:59 | 第五次发布：合并 M3 `635154b` / M4 `e148c5d` → `deploy.ps1`（M3 `bridge.js`+`memory/risk-profile.js`+`content/memory-render.js`；M4 只改 `bridge.js` 与 tests，tests 不上线） | 全绿 692；备份 `src.bak-185849`；部署锁 `.deploy-lock` 已释放；`qq-bridge` active、NRestarts=0、无错误日志 |
 
 **回滚点（记清楚，别搞错）**
 
 | 目的 | 用什么 | 说明 |
 | --- | --- | --- |
-| 代码整轮回滚（含 M1） | `/opt/qq-bridge/src.bak-172224` | **M1 上线前的完整快照**，当前最新回滚点 |
+| 代码整轮回滚（含 M3+M4） | `/opt/qq-bridge/src.bak-185849` | **M3+M4 上线前的完整快照**，当前最新回滚点 |
+| 代码整轮回滚（含 M1） | `/opt/qq-bridge/src.bak-172224` | M1 上线前的完整快照 |
 | preset 回滚（含 M2） | `.../presets/qq-chat-v2.patch.yml.bak-1723` | M2 上线前的 patch |
 | 代码整轮回滚（含 R1） | `/opt/qq-bridge/src.bak-164220` | R1 上线前的完整快照 |
 | 代码整轮回滚（到本轮加固前） | `/opt/qq-bridge/src.bak-144829` | 本轮改动前的完整快照 |
@@ -90,8 +92,9 @@ ssh root@175.178.200.118 "cp -a /opt/qq-bridge/plugins/qq-agent-presets/presets/
 | 文件 | md5 |
 | --- | --- |
 | `src/guards/outbound-content.js` | `d7d2c989e9726bbfb5e22c1f46975c93` |
-| `src/content/memory-render.js` | `2111c1e37810439ceb81f03177af3824` |
-| `src/bridge.js` | `92e81359f007b1bfe05e4a6d440229dc` |
+| `src/content/memory-render.js` | `c94ebac6b227904e5b6a43afa898fcc9` |
+| `src/bridge.js` | `745d40861681841b99de6a6c780397bf` |
+| `src/memory/risk-profile.js` | `c52b6d57d69d54a49af28b81f6415bbd` |
 | `plugins/.../qq-chat-v2.patch.yml` | `9071a2f768e30a7830dc250783658af4` |
 
 ---
@@ -100,11 +103,13 @@ ssh root@175.178.200.118 "cp -a /opt/qq-bridge/plugins/qq-agent-presets/presets/
 
 | 项 | 证据 |
 | --- | --- |
-| 单测 | `node --test tests/*.test.mjs` → **672 通过 / 0 失败**（656 + M1 的 11 + M2 的 5） |
+| 单测 | `node --test tests/*.test.mjs` → **692 通过 / 0 失败**（672 + M3 的 11 + M4 的 9） |
 | preset 契约 | `node scripts/test-agent-preset-patches.mjs` → 通过 |
 | 线上模块 | 在服务器跑 `evaluateContent`：实体命中→拦、称呼命中→拦、owner 私聊→放行（`entity false entity / kinship false kinship / owner true`） |
 | R1 线上判定 | `床以外都是远方`→`presetEcho` 拦；`行吧，床以外都是远方，睡`→拦；`今天的运动量还行`→放行 |
 | M1 线上判定 | `PC电脑资源大合集打开即可下载 .txt`→可疑（3 命中）；`毕业照.jpg`→放行；正文「我去下载个东西」→放行 |
+| M3 线上判定 | `src/memory/risk-profile.js` 已随 deploy 上线，md5 本地/远端一致；`markKinshipRefusalV2` 改为薄门面调纯函数，行为不变（单测覆盖私聊记/群聊不记/重复不叠加）；`renderMemory` 印象行渲染风险档案（爱下套/不能接话题/已拒绝称呼） |
+| M4 线上判定 | `evaluateWakeTriggerV2` 接入「点名门」：同一人连续点名 ≥3 次（期间 AI 未回）时 @/名字 不再单独唤醒，落回关键词/提问等触发；单测 9 条覆盖换人重置、AI 回话重置、阈值钉死为 3 |
 | 文件一致 | src + patch 的 md5 本地/远端完全一致 |
 | 服务 | `qq-bridge` / `dsh-web` 均 `active` |
 | 真实拦截 | **0 次**（`entity-blocked` 0、`kinship-blocked` 0、`preset-echo` 0、`suspicious-file` 0）——见第 7 节 |

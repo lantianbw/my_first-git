@@ -244,7 +244,7 @@ git worktree add ../qq-bridge-m2 -b mod/m2-preset-boundaries
 | M1 | 已完成 | mod/m1-inbound-files | ab6542a | 线上判定已验 | 17:23 上线 |
 | M2 | 已完成 | mod/m2-preset-boundaries | a2573b3 | patch --check 过 | 17:24 上线 |
 | M3 | 已完成 | mod/m3-memory-risk | 635154b | 683 全绿、已合并 | 18:38 合并 main |
-| M4 | 待开工 | mod/m4-mention-gate | — | — | 已解阻（M3 已合并） |
+| M4 | 已完成 | mod/m4-mention-gate | e148c5d | 692 全绿、已合并 | 18:59 随 M3 上线 |
 | M5 | 已完成 | mod/m5-ops-metrics | 841b51c | 三行指标已出 | 24h 观察待补 |
 | M6 | 已完成 | mod/m6-preset-contract | b0b1b76 | 契约 7/7 转绿 | 已合并 main，无需部署 |
 
