@@ -45,6 +45,7 @@
 | **M10** | QQ 资料管理探测 | 功能愿望清单 §3 | 只读探测 SnowLuma 是否支持改资料（可新增 `scripts/probe-*.mjs`）；**先不改任何功能代码** | `src/*`、preset | 无（只读） | 第 4 批 |
 | **M11** | 能力清单 + 告警通道 | 新需求：她知道自己的功能 / 坏了告诉主人 | `src/bridge.js`（`qq_get_prompt` 加 `capabilities` 返回 + `qq_report_feedback` 真通知 owner）、`src/tools/capabilities.js`（新建，人话能力表）、`tests/*` | preset、`src/guards/*` | 无（bridge 泳道） | 第 5 批 |
 | **M12** | 她的自述话术 | 新需求：问会什么 / 坏了怎么说 | `dsh/agent-presets/qq-chat-v2/agent.cordis.yml`、`plugins/qq-agent-presets/presets/qq-chat-v2.patch.yml`（生成物）、`tests/*` | `src/*` | 无（preset 泳道） | 第 5 批 |
+| **M13** | 记忆证据引用 | 借鉴 lingshu 的 I4「逐字可溯」：记忆要带原话 | `src/memory/risk-profile.js`、`src/memory/affection-profile.js`、`src/content/memory-render.js`、`src/bridge.js` **仅记忆段**、`tests/*` | preset、`src/guards/*`、`src/inbound/*` | 无（bridge 泳道） | 第 6 批 |
 
 **为什么这么切**：`src/bridge.js` 是唯一热点，M1/M3/M4 都会碰它，所以必须串行；preset 是第二热点，M2/M6 串行；其余文件天然隔离。M7 只动 `config.json`（换 `socialV2.voice.tts.voiceId`）+ 一个复刻辅助脚本，不碰代码泳道与 preset 泳道，天然隔离。M8（bridge）/ M9（preset）/ M10（只读探测）分属三个不同泳道，可并行。
 
@@ -145,8 +146,14 @@ git worktree add ../qq-bridge-m2 -b mod/m2-preset-boundaries
 
 | 模块 | 工作区 | 分支 | 状态 |
 | --- | --- | --- | --- |
-| M11 | `E:\DSH\qq-bridge-m11` | `mod/m11-capabilities` | 待开工 |
-| M12 | `E:\DSH\qq-bridge-m12` | `mod/m12-self-report` | 待开工 |
+| M11 | `E:\DSH\qq-bridge-m11` | `mod/m11-capabilities` | 已完成（b456283，worktree 已清理） |
+| M12 | `E:\DSH\qq-bridge-m12` | `mod/m12-self-report` | 已完成（699ef05，worktree 已清理） |
+
+**第 5 批工作区已建好：**
+
+| 模块 | 工作区 | 分支 | 状态 |
+| --- | --- | --- | --- |
+| M13 | `E:\DSH\qq-bridge-m13` | `mod/m13-evidence` | 待开工 |
 
 所有工作区的 `node_modules` 已用目录联接指向主干仓库，可直接跑测试/构建。
 
@@ -448,12 +455,59 @@ git worktree add ../qq-bridge-m2 -b mod/m2-preset-boundaries
 结束前按四行汇报（改了什么 / 测试结果 / commit / 等谁下一步）。
 ```
 
+### M13 记忆证据引用（借鉴 lingshu 的 I4）
+
+**目标**：给记忆条目加**原话证据**（`evidence`），让「爱下套 / 不能接的话题 / 已拒绝称呼 / 好感度」这些**结论**都能回溯到**当时的原话**，渲染时一并给模型看。
+
+**为什么做**（这是「被套路」的根子）：
+- 现在 `memberImpressions` 只记结论（`traits: ['要过亲属称呼，已拒绝']`、`risk.trapHappy: true`）。模型下次唤醒只看到结论，看不到他当时**怎么说的**。
+- 后果三条：① 记错无法纠正（不知道因哪句话记的）；② 判断丢语境（是玩笑还是恶意？）；③ 模型只能按结论一律设防，态度没法分化。
+- 来源：GitHub `Lsjh7128/lingshu` 的不变量 I4「一切推断逐字可溯、可否认、可回滚」，它用 `evidence_quote` 在四处强制。
+
+**背景事实（已核实）**：
+- `src/memory/risk-profile.js`：`markKinshipRefusal({ key, recentMessages, memberImpressions })` 已能从 `recentMessages` 取到最后一条对方消息 —— **原话就在手边，只是没存**。
+- `src/memory/affection-profile.js`：`adjustAffection/setAffection/addAffectionTag` 只收 delta/tag，没有语境。
+- `src/content/memory-render.js`：`renderRiskNotes(im)` 与 `renderAffectionNote(im)` 是渲染入口。
+- `src/bridge.js`：`markKinshipRefusalV2`（约 10681）是唯一写入点；`renderMemory` 在唤醒时拼记忆块。
+
+**设计（钉死形状，不要改）**：
+```js
+// memberImpressions.<name>.evidence —— 最近 N 条（建议 3）证据，新的在前
+evidence: [{ quote: string, at: number, key: string, kind: string }]
+//   quote: 原话，截断到 40 字（去换行/压空白）
+//   at:    时间戳（毫秒）
+//   key:   来源会话（private:xxx / group:xxx）
+//   kind:  'kinship' | 'trap' | 'topic' | 'affection' —— 这条证据支撑哪类判断
+```
+- **写入**：`markKinshipRefusal` 命中时，把触发它的那条原话存成 `kind:'kinship'` 证据；`adjustAffection` 若有语境则存 `kind:'affection'`。同 quote 去重；最多 3 条，新的在前。
+- **渲染**：`renderRiskNotes`/`renderAffectionNote` 末尾追加一句原话，形如 `（原话：「叫声爷爷听听」）`，**只给最近 1 条**（提示词预算有限）。
+- **兼容**：没有 `evidence` 的老数据照旧渲染，不报错、不补默认值。
+
+**验收**：单测覆盖「写入时存原话 / 超 3 条淘汰最旧 / 同句去重 / 无 evidence 老数据兼容 / 渲染只出最近 1 条」；全量不回归。
+
+```
+你是 qq-bridge 的 M13 模块负责人（记忆证据引用，bridge 泳道）。
+先读 docs/module-ownership.md 的 M13 任务书，再读 src/memory/risk-profile.js、src/memory/affection-profile.js、src/content/memory-render.js（renderRiskNotes / renderAffectionNote）、src/bridge.js 的 markKinshipRefusalV2（约 10681）。
+工作目录：E:\DSH\qq-bridge-m13（分支 mod/m13-evidence，已建好，node_modules 已联接）。
+
+任务：给记忆条目加原话证据 evidence，让结论可追溯到当时那句话；渲染时给模型看最近 1 条原话。
+只改 src/memory/risk-profile.js、src/memory/affection-profile.js、src/content/memory-render.js、src/bridge.js 的记忆段、tests/*。
+evidence 形状钉死：{ quote, at, key, kind }，quote 截断 40 字，最多 3 条新的在前，同句去重。
+不要碰 preset、src/guards/*、src/inbound/*（别的模块在用）。
+老数据（没有 evidence）必须照旧渲染，不报错不补默认值。
+基线：node --test tests/*.test.mjs 当前 749，交付时不得低于 749。
+交付：单测 + 全量不回归 + commit；不部署、不合并不 push。
+结束前按四行汇报（改了什么 / 测试结果 / commit / 等谁下一步）。
+```
+
+**待评估（本轮不做）**：lingshu 的「首尾人格锚点」。技术上不好落——人格文本在 preset（系统提示），`buildWithTail` 构造的是用户消息，要在结尾锚人格，bridge 得硬编码人格内容、与 preset 脱节。若要做，先评估 preset 分段结构（`src/bridge.js` 约 14389 的 `{ name: 'role', ... removable: false }`）能否安全调整顺序。
+
 ---
 
 ## 6. 完成定义（DoD，四个都满足才算完）
 
 1. 只改了自己模块清单里的文件（`git diff --name-only` 自查）；
-2. 全量测试通过（当前基线 **711**：656 起始 + M1 11 + M2 5 + M3 11 + M4 9 + M8 12 + M9 7；跑 `node --test tests/*.test.mjs` 不得低于 711），新增单测覆盖验收点；
+2. 全量测试通过（当前基线 **749**：656 起始 + M1 11 + M2 5 + M3 11 + M4 9 + M8 12 + M9 7 + M11 25 + M12 13；跑 `node --test tests/*.test.mjs` 不得低于 749），新增单测覆盖验收点；
 3. 已提交到自己的分支，报告 commit hash；
 4. 没有部署、没有合并、没有重启线上服务。
 
@@ -475,6 +529,7 @@ git worktree add ../qq-bridge-m2 -b mod/m2-preset-boundaries
 | M10 | 已完成 | mod/m10-profile-probe | 24dfece | 脚本就绪、已合并 | 21:47 合并 main |
 | M11 | 已完成 | mod/m11-capabilities | b456283 | 749 全绿、已上线 | 01:00 部署，线上验证 22 项能力 |
 | M12 | 已完成 | mod/m12-self-report | 699ef05 | 749 全绿、已上线 | 01:00 随 M11 上线 |
+| M13 | 待开工 | mod/m13-evidence | — | — | 记忆证据引用，bridge 泳道 |
 
 状态只允许四种：`待开工` / `进行中` / `待合并` / `已完成`。改状态时顺手写时间。
 
