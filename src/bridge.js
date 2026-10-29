@@ -128,6 +128,8 @@ import { createRateLimiter } from './outbound/rate.js';
 import { segmentsToText as normalizeSegments, extractMediaFromSegments, sanitizeMediaSummary } from './inbound/segments.js';
 // inbound/message 影子（契约 docs/inbound-message-dto.md）：只比媒体归一，不改变行为。
 import { sanitizeMediaList } from './inbound/message.js';
+// M1 入站文件安全：群文件名像「资源合集/下载/解压密码/打开即可/网盘」的不唤醒（交接文档 §6-2）。
+import { assessFileRisk } from './inbound/file-risk.js';
 import { isAllowed } from './auth/allow.js';
 import { judgeHealth, snowlumaSnapshot } from './observability/health.js';
 import { summarize as summarizeActivity } from './observability/activity.js';
@@ -14959,6 +14961,18 @@ async function main() {
       });
     }
     const isOwner = String(event.user_id) === String(cfg.ownerQQ ?? '');
+    // M1 入站文件安全（docs/module-ownership.md M1 / 交接文档 §6-2）：群文件名像「资源合集 / 解压密码 /
+    // 打开即可 / 网盘 / 下载」的，不唤醒也不接话，只记一条 activity —— 这类文件名是钩子，复述一句
+    // 就等于替它做了扩散。必须挡在入库之前：10-29 15:22 就是文件名进了上下文，它才接着
+    // 「这文件名比内容还长」说下去。只算群友的文件（owner 自己发的照常处理），聊天里提一句
+    // 「网盘」不算 —— 判定只看 file 段与 `[文件…]` 标记（规则在 inbound/file-risk）。
+    const fileRisk = kind === 'group' && !isOwner
+      ? assessFileRisk({ segments: event.message ?? [], text: textContent })
+      : null;
+    if (fileRisk?.suspicious) {
+      appendActivity(`${key} [guard] suspicious-file：${fileRisk.reason}`);
+      return;
+    }
     const roleState = readRoleState();
 
     // 若该会话有挂起的提问/审批，先当作回答处理（用当前消息自己的文字，不含引用原文）。
